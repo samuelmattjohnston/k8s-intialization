@@ -1,0 +1,199 @@
+---
+- hosts: masters
+  become: yes
+  tasks:
+    # --- OS PREP & REPO SETUP ---
+    - name: Load Kernel Modules
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+          
+    - name: Activate Modules
+      shell: modprobe overlay && modprobe br_netfilter
+
+    - name: Configure Sysctl
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+    
+    - name: Apply Sysctl
+      command: sysctl --system
+
+    # Fix for missing DNS during bootstrap: Populate /etc/hosts
+    - name: Update /etc/hosts for Local Resolution
+      blockinfile:
+        path: /etc/hosts
+        block: |
+          127.0.0.1 localhost
+          127.0.1.1 {{ inventory_hostname }}
+          # Cluster Nodes
+          {% for host in groups['masters'] %}
+          {{ hostvars[host].admin_ip }} {{ host }}
+          {% endfor %}
+
+    - name: Install Dependencies
+      apt:
+        # Added 'conntrack' to fix preflight check failure
+        name: [apt-transport-https, ca-certificates, curl, gpg, socat, conntrack]
+        state: present
+        update_cache: yes
+
+    # --- CONTAINERD SETUP ---
+    - name: Add Docker Repo
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Update APT Cache (Explicit)
+      apt:
+        update_cache: yes
+
+    - name: Install Containerd
+      apt:
+        name: containerd.io
+        state: present
+
+    - name: Configure Containerd
+      shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+        # Fix 1: Enable Systemd Cgroups
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+        # Fix 2: Force correct Sandbox Image for K8s 1.31
+        sed -i 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:3.10"|g' /etc/containerd/config.toml
+      notify: Restart Containerd
+
+    # --- KUBERNETES INSTALL ---
+    - name: Add K8s Repo
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+      args:
+        creates: /etc/apt/sources.list.d/kubernetes.list
+
+    - name: Install Kube Tools
+      apt:
+        name: [kubelet, kubeadm, kubectl]
+        state: present
+        update_cache: yes
+    
+    - name: Hold Packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: [kubelet, kubeadm, kubectl]
+
+    # --- KUBE-VIP PREP (HA) ---
+    - name: Create Manifest Directory
+      file: path=/etc/kubernetes/manifests state=directory
+
+    # Pre-pulling is critical so the Static Pod starts fast enough for kubeadm init
+    - name: Pre-pull Kube-VIP Image
+      command: crictl pull ghcr.io/kube-vip/kube-vip:v0.8.0
+      register: vip_pull
+      retries: 5
+      delay: 10
+      until: vip_pull.rc == 0
+      
+    - name: Deploy Kube-VIP Static Pod
+      template:
+        src: templates/kube-vip.yaml.j2
+        dest: /etc/kubernetes/manifests/kube-vip.yaml
+
+    - name: Pre-pull Kubernetes Images
+      command: kubeadm config images pull --kubernetes-version v1.31.0
+      register: k8s_pull
+      retries: 5
+      delay: 10
+      until: k8s_pull.rc == 0
+
+  handlers:
+    - name: Restart Containerd
+      service: name=containerd state=restarted
+# --- BOOTSTRAP / CHECK MASTER 1 ---
+- hosts: k8s-node-01
+  become: yes
+  tasks:
+    - name: Check if Cluster is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: cluster_admin_conf
+
+    - name: Initialize Cluster (Only if not exists)
+      command: >
+        kubeadm init 
+        --control-plane-endpoint "{{ cluster_vip }}:6443" 
+        --upload-certs 
+        --apiserver-advertise-address "{{ admin_ip }}" 
+        --pod-network-cidr "10.244.0.0/16"
+      args:
+        creates: /etc/kubernetes/admin.conf
+      register: init_output
+      when: not cluster_admin_conf.stat.exists
+
+    - name: Setup Kubeconfig for User
+      shell: |
+        mkdir -p /home/{{ ansible_user }}/.kube
+        cp /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
+        chown -R {{ ansible_user }}:{{ ansible_user }} /home/{{ ansible_user }}/.kube
+
+    # --- DYNAMIC TOKEN REFRESH (Robust Join Strategy) ---
+    - name: Get Fresh Join Command
+      command: kubeadm token create --print-join-command
+      register: join_command_raw
+
+    - name: Get Fresh Certificate Key
+      shell: kubeadm init phase upload-certs --upload-certs | tail -1
+      register: cert_key_raw
+
+    - name: Set Join Variables
+      set_fact:
+        # Extract just the "kubeadm join <ip>:<port>" part and flags
+        join_base: "{{ join_command_raw.stdout }}" 
+        cert_key: "{{ cert_key_raw.stdout | trim }}"
+
+    - name: Create Clean Join Script
+      copy:
+        dest: "/tmp/join_script.sh"
+        mode: 0755
+        content: |
+          #!/bin/bash
+          {{ join_base }} \
+          --control-plane \
+          --certificate-key {{ cert_key }} \
+          --apiserver-advertise-address $1
+
+    - name: Fetch Join Script
+      fetch:
+        src: /tmp/join_script.sh
+        dest: ./join_script.sh
+        flat: yes
+
+# --- JOIN MASTERS 2 & 3 ---
+- hosts: k8s-node-02,k8s-node-03
+  become: yes
+  tasks:
+    - name: Check if already joined
+      stat: path=/etc/kubernetes/kubelet.conf
+      register: joined
+
+    - name: Copy Join Script
+      copy:
+        src: ./join_script.sh
+        dest: /tmp/join_script.sh
+        mode: 0755
+      when: not joined.stat.exists
+
+    - name: Join Cluster
+      # We explicitly pass the Admin IP as the first argument ($1)
+      command: "/tmp/join_script.sh {{ admin_ip }}"
+      when: not joined.stat.exists

@@ -1,0 +1,59 @@
+---
+- hosts: masters
+  become: yes
+  tasks:
+    - name: Install systemd-resolved
+      apt:
+        name: systemd-resolved
+        state: present
+
+    # --- 1. ADMIN (enX0) - Existing Management ---
+    - name: Configure Admin Interface
+      copy:
+        dest: /etc/systemd/network/10-admin.network
+        content: |
+          [Match]
+          Name={{ iface_admin }}
+          [Network]
+          Address={{ admin_ip }}/24
+
+    # --- 2. PUBLIC (enX1) - Gateway & Ingress ---
+    - name: Configure Public Interface
+      copy:
+        dest: /etc/systemd/network/20-public.network
+        content: |
+          [Match]
+          Name={{ iface_public }}
+          [Network]
+          Address={{ public_ip }}/24
+          Gateway={{ gateway_public }}
+          DNS=1.1.1.1 8.8.8.8
+
+    # --- 3. PRIVATE (enX2) - CNI Overlay ---
+    - name: Configure Private Interface
+      copy:
+        dest: /etc/systemd/network/30-private.network
+        content: |
+          [Match]
+          Name={{ iface_private }}
+          [Network]
+          Address={{ private_ip }}/24
+
+    # --- 4. INTERNAL (enX3) - Storage/DB ---
+    - name: Configure Internal Interface
+      copy:
+        dest: /etc/systemd/network/40-internal.network
+        content: |
+          [Match]
+          Name={{ iface_internal }}
+          [Network]
+          Address={{ internal_ip }}/24
+
+    - name: Apply Network Changes
+      shell: |
+        systemctl disable --now ifupdown
+        systemctl enable --now systemd-networkd
+        systemctl enable --now systemd-resolved
+        systemctl restart systemd-networkd
+      async: 15
+      poll: 0

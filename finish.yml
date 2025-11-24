@@ -1,0 +1,70 @@
+---
+- hosts: k8s-node-01
+  become: yes
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  tasks:
+    # --- 1. INSTALL CALICO (CNI) ---
+    
+    # FIX: Use --server-side to bypass the 256KB annotation limit
+    - name: Install Calico Operator
+      shell: |
+        kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml
+
+    # --- FIX CIDR MISMATCH (192.168 vs 10.244) ---
+    - name: Download Calico Custom Resources
+      get_url:
+        url: https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml
+        dest: /tmp/calico-custom-resources.yaml
+
+    - name: Patch Calico CIDR to match Kubeadm (10.244.0.0/16)
+      replace:
+        path: /tmp/calico-custom-resources.yaml
+        regexp: '192.168.0.0/16'
+        replace: '10.244.0.0/16'
+
+    - name: Apply Patched Calico Resources
+      shell: kubectl apply -f /tmp/calico-custom-resources.yaml
+    # ---------------------------------------------
+
+    # --- WAIT FOR OPERATOR ---
+    - name: Wait for Calico DaemonSet to exist
+      shell: kubectl get ds -n calico-system calico-node
+      register: ds_check
+      retries: 20
+      delay: 10
+      until: ds_check.rc == 0
+
+    # CRITICAL: Force Calico to use Private Interface (enX2)
+    - name: Patch Calico Autodetection
+      shell: |
+        kubectl set env daemonset/calico-node -n calico-system IP_AUTODETECTION_METHOD=interface={{ iface_private }}
+      retries: 5
+      delay: 5
+      register: result
+      until: result.rc == 0
+
+    # --- 2. UNTAINT MASTERS ---
+    - name: Untaint Masters
+      shell: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      ignore_errors: yes
+
+    # --- 3. INSTALL METALLB (Load Balancer) ---
+    - name: Install MetalLB
+      shell: |
+        kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/manifests/metallb-native.yaml
+        kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
+      ignore_errors: yes
+
+    - name: Apply MetalLB Configuration
+      template:
+        src: templates/metallb-config.yaml.j2
+        dest: /tmp/metallb-config.yaml
+
+    - name: Activate MetalLB Pool
+      shell: kubectl apply -f /tmp/metallb-config.yaml
+
+    # --- 4. INSTALL INGRESS ---
+    - name: Install Nginx Ingress Controller
+      shell: |
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.2/deploy/static/provider/cloud/deploy.yaml
