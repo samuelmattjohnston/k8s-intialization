@@ -7,47 +7,90 @@
         name: systemd-resolved
         state: present
 
-    # --- 1. ADMIN (enX0) - Existing Management ---
+    # --------------------------------------------------
+    # 1. ADMIN (enX0) - THE NEW DEFAULT GATEWAY
+    # --------------------------------------------------
+    # By making this the default, all system traffic (Kubelet, SSH, API)
+    # automatically uses this interface. No leaks, no complex rules.
     - name: Configure Admin Interface
       copy:
         dest: /etc/systemd/network/10-admin.network
         content: |
           [Match]
           Name={{ iface_admin }}
+          
           [Network]
           Address={{ admin_ip }}/24
+          Gateway={{ admin_ip.split('.')[0:3] | join('.') }}.254
+          DNS=1.1.1.1
 
-    # --- 2. PUBLIC (enX1) - Gateway & Ingress ---
+    # --------------------------------------------------
+    # 2. PUBLIC (enX1) - INGRESS ONLY (Split Horizon)
+    # --------------------------------------------------
+    # We only need one rule here: "If traffic enters here, reply here."
+    # This allows MetalLB/Ingress to work without hijacking system traffic.
     - name: Configure Public Interface
       copy:
         dest: /etc/systemd/network/20-public.network
         content: |
           [Match]
           Name={{ iface_public }}
+          
           [Network]
           Address={{ public_ip }}/24
+          # Note: NO default Gateway here.
+          
+          # POLICY: Source Routing (Table 200)
+          # Ensures that if an external user hits this IP, the reply goes back out this NIC.
+          [RoutingPolicyRule]
+          From={{ public_ip }}/32
+          Table=200
+          Priority=200
+          
+          # ROUTE: The Gateway for Table 200 only
+          [Route]
+          Destination=0.0.0.0/0
           Gateway={{ gateway_public }}
-          DNS=1.1.1.1 8.8.8.8
+          Table=200
 
-    # --- 3. PRIVATE (enX2) - CNI Overlay ---
+    # --------------------------------------------------
+    # 3. PRIVATE (enX2) - CNI (Simple Layer 2)
+    # --------------------------------------------------
     - name: Configure Private Interface
       copy:
         dest: /etc/systemd/network/30-private.network
         content: |
           [Match]
           Name={{ iface_private }}
+          
           [Network]
           Address={{ private_ip }}/24
+          # No Gateway. No Rules. Calico handles the routing between nodes.
 
-    # --- 4. INTERNAL (enX3) - Storage/DB ---
+    # --------------------------------------------------
+    # 4. INTERNAL (enX3) - STORAGE
+    # --------------------------------------------------
     - name: Configure Internal Interface
       copy:
         dest: /etc/systemd/network/40-internal.network
         content: |
           [Match]
           Name={{ iface_internal }}
+          
           [Network]
           Address={{ internal_ip }}/24
+
+    # --------------------------------------------------
+    # CLEANUP & APPLY
+    # --------------------------------------------------
+    - name: Remove Old Policy Files
+      file:
+        path: "/etc/systemd/network/{{ item }}"
+        state: absent
+      loop:
+        - 50-admin-policy.network
+        - 60-public-policy.network
+        - 70-isolation-policy.network
 
     - name: Apply Network Changes
       shell: |
