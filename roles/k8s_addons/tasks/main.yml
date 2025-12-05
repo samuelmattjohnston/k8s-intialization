@@ -94,3 +94,17 @@
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', 'metallb-config.yaml.j2') }}"
+
+# ==============================================================================
+# 5. NODE TAINTS
+# ==============================================================================
+- name: "Taint: Ensure Masters are Schedulable"
+  kubernetes.core.k8s_taint:
+    state: absent
+    name: "{{ item }}"
+    taints:
+      - key: "node-role.kubernetes.io/control-plane"
+        effect: "NoSchedule"
+  loop: "{{ groups['masters'] }}"
+  # Only untaint if the variable is true (default)
+  when: hostvars[item].k8s_schedulable | default(true) | bool
