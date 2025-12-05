@@ -1,11 +1,11 @@
 ---
-- hosts: k8s-node-01
+- hosts: masters[0]
   become: yes
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
   tasks:
     # --------------------------------------------------
-    # 1. PRE-REQUISITES (Strict ARP)
+    # 1. PRE-REQUISITES
     # --------------------------------------------------
     - name: Enable strictARP in kube-proxy
       shell: |
@@ -15,12 +15,12 @@
       register: arp_patch
       changed_when: "'configured' in arp_patch.stdout"
 
-    - name: Restart kube-proxy to apply StrictARP
+    - name: Restart kube-proxy
       shell: kubectl delete pod -n kube-system -l k8s-app=kube-proxy
       when: arp_patch.changed
 
     # --------------------------------------------------
-    # 2. INSTALL CALICO (CNI) - Updated v3.29.1
+    # 2. INSTALL CALICO
     # --------------------------------------------------
     - name: Install Calico Operator
       shell: |
@@ -31,22 +31,23 @@
         url: https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/custom-resources.yaml
         dest: /tmp/calico-custom-resources.yaml
 
-    - name: Patch Calico CIDR to match Kubeadm (10.244.0.0/16)
+    - name: Patch Calico CIDR
       replace:
         path: /tmp/calico-custom-resources.yaml
         regexp: '192.168.0.0/16'
         replace: '10.244.0.0/16'
 
-    - name: Apply Patched Calico Resources
+    - name: Apply Calico Resources
       shell: kubectl apply -f /tmp/calico-custom-resources.yaml
 
-    - name: Wait for Calico DaemonSet
+    - name: Wait for Calico
       shell: kubectl get ds -n calico-system calico-node
       register: ds_check
       retries: 20
       delay: 10
       until: ds_check.rc == 0
 
+    # DYNAMIC: Patches autodetection for ALL nodes based on interface name
     - name: Patch Calico Autodetection
       shell: |
         kubectl set env daemonset/calico-node -n calico-system IP_AUTODETECTION_METHOD=interface={{ iface_private }}
@@ -55,19 +56,19 @@
       until: result.rc == 0
       register: result
 
-    - name: Untaint Masters
+    - name: Untaint Masters (Allow workloads on control plane)
       shell: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
       ignore_errors: yes
 
     # --------------------------------------------------
-    # 3. INSTALL GATEWAY API (The Modern Interface)
+    # 3. INSTALL GATEWAY API
     # --------------------------------------------------
-    - name: Install Gateway API CRDs (Standard Channel)
+    - name: Install Gateway API CRDs
       shell: |
         kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
 
     # --------------------------------------------------
-    # 4. INSTALL ISTIO (The Controller)
+    # 4. INSTALL ISTIO
     # --------------------------------------------------
     - name: Download Istioctl
       shell: |
@@ -77,22 +78,22 @@
       args:
         creates: /usr/local/bin/istioctl
 
-    - name: Generate Istio Declarative Config
+    - name: Generate Istio Config
       template:
         src: templates/istio-install-config.yaml.j2
         dest: /tmp/istio-config.yaml
 
-    - name: Apply Istio Configuration (Declarative)
+    - name: Apply Istio
       shell: |
         istioctl install -y -f /tmp/istio-config.yaml
 
     # --------------------------------------------------
-    # 5. INSTALL METALLB (Load Balancer) - Updated v0.14.9
+    # 5. INSTALL METALLB
     # --------------------------------------------------
     - name: Create MetalLB Namespace
       shell: kubectl create namespace metallb-system --dry-run=client -o yaml | kubectl apply -f -
 
-    - name: Label MetalLB Namespace for Pod Security
+    - name: Label MetalLB Namespace
       shell: |
         kubectl label namespace metallb-system \
         pod-security.kubernetes.io/enforce=privileged \
@@ -100,23 +101,23 @@
         pod-security.kubernetes.io/warn=privileged \
         --overwrite
 
-    - name: Install MetalLB Manifest
+    - name: Install MetalLB
       shell: |
         kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
         kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
 
-    - name: Apply MetalLB Configuration (Pools & Advertisements)
+    - name: Apply MetalLB Pool
       template:
         src: templates/metallb-config.yaml.j2
         dest: /tmp/metallb-config.yaml
 
-    - name: Activate MetalLB Pool
+    - name: Activate Pool
       shell: kubectl apply -f /tmp/metallb-config.yaml
 
     # --------------------------------------------------
-    # 6. DEPLOY THE GATEWAY
+    # 6. DEPLOY GATEWAY
     # --------------------------------------------------
-    - name: Deploy Modern Gateway Resource
+    - name: Deploy Gateway
       template:
         src: templates/gateway.yaml.j2
         dest: /tmp/gateway.yaml

@@ -1,8 +1,11 @@
 ---
+# --------------------------------------------------
+# PHASE 1: PREPARE ALL NODES (OS & DEPENDENCIES)
+# --------------------------------------------------
 - hosts: masters
   become: yes
   tasks:
-    # --- OS PREP & REPO SETUP ---
+    # --- OS PREP ---
     - name: Load Kernel Modules
       copy:
         dest: /etc/modules-load.d/k8s.conf
@@ -24,12 +27,12 @@
     - name: Apply Sysctl
       command: sysctl --system
 
-    # CRITICAL MODERNIZATION: Disable Swap
     - name: Disable Swap
       shell: |
         swapoff -a
         sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
+    # DYNAMIC: Generates /etc/hosts entries for every node in the 'masters' group
     - name: Update /etc/hosts for Local Resolution
       blockinfile:
         path: /etc/hosts
@@ -46,7 +49,7 @@
         state: present
         update_cache: yes
 
-    # --- CONTAINERD SETUP ---
+    # --- CONTAINERD ---
     - name: Add Docker Repo
       shell: |
         install -m 0755 -d /etc/apt/keyrings
@@ -73,7 +76,7 @@
         sed -i 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:3.10"|g' /etc/containerd/config.toml
       notify: Restart Containerd
 
-    # --- KUBERNETES INSTALL ---
+    # --- KUBERNETES ---
     - name: Add K8s Repo
       shell: |
         curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
@@ -93,11 +96,10 @@
         selection: hold
       loop: [kubelet, kubeadm, kubectl]
 
-    # --- KUBE-VIP PREP (HA) ---
+    # --- KUBE-VIP (HA) ---
     - name: Create Manifest Directory
       file: path=/etc/kubernetes/manifests state=directory
 
-    # UPDATED: v0.8.2
     - name: Pre-pull Kube-VIP Image
       command: crictl pull ghcr.io/kube-vip/kube-vip:v0.8.2
       register: vip_pull
@@ -121,8 +123,10 @@
     - name: Restart Containerd
       service: name=containerd state=restarted
 
-# --- BOOTSTRAP / CHECK MASTER 1 ---
-- hosts: k8s-node-01
+# --------------------------------------------------
+# PHASE 2: BOOTSTRAP LEADER (First Node in Inventory)
+# --------------------------------------------------
+- hosts: masters[0]
   become: yes
   tasks:
     - name: Check if Cluster is already initialized
@@ -179,9 +183,12 @@
         dest: ./join_script.sh
         flat: yes
 
-# --- JOIN MASTERS 2 & 3 ---
-- hosts: k8s-node-02,k8s-node-03
+# --------------------------------------------------
+# PHASE 3: JOIN FOLLOWERS (All Other Nodes)
+# --------------------------------------------------
+- hosts: masters[1:]
   become: yes
+  serial: 1 # Joins one by one to ensure etcd stability
   tasks:
     - name: Check if already joined
       stat: path=/etc/kubernetes/kubelet.conf
@@ -195,5 +202,6 @@
       when: not joined.stat.exists
 
     - name: Join Cluster
+      # Dynamic: We pass this specific node's admin_ip to the script
       command: "/tmp/join_script.sh {{ admin_ip }}"
       when: not joined.stat.exists
