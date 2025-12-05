@@ -1,5 +1,26 @@
 # ----------------------------------------------------------------------
-# LOGIC: STANDARD MODE (Discrete NICs)
+# LOGIC: IP ADDRESS CALCULATION
+# ----------------------------------------------------------------------
+- name: "Normalize: Construct IP Addresses and Masks"
+  set_fact:
+    # 1. Construct the IP (Prefix + Node ID)
+    admin_ip: "{{ networks.admin.prefix }}.{{ node_id }}"
+    public_ip: "{{ networks.public.prefix }}.{{ node_id }}"
+    private_ip: "{{ networks.private.prefix }}.{{ node_id }}"
+    internal_ip: "{{ networks.internal.prefix }}.{{ node_id }}"
+
+    # 2. Extract the CIDR Masks
+    admin_cidr: "{{ networks.admin.cidr }}"
+    public_cidr: "{{ networks.public.cidr }}"
+    private_cidr: "{{ networks.private.cidr }}"
+    internal_cidr: "{{ networks.internal.cidr }}"
+
+    # 3. Construct Gateways (Prefix + Configured Octet)
+    gateway_admin: "{{ networks.admin.prefix }}.{{ networks.admin.gateway_octet | default('254') }}"
+    gateway_public: "{{ networks.public.prefix }}.{{ networks.public.gateway_octet | default('254') }}"
+
+# ----------------------------------------------------------------------
+# LOGIC: INTERFACE MAPPING (Standard vs Trunk)
 # ----------------------------------------------------------------------
 - name: "Normalize: Map Standard Interfaces"
   set_fact:
@@ -10,9 +31,6 @@
     create_vlans: false 
   when: mode == 'standard'
 
-# ----------------------------------------------------------------------
-# LOGIC: TRUNK MODE (VLANs on Parent)
-# ----------------------------------------------------------------------
 - name: "Normalize: Map Trunk Interfaces"
   set_fact:
     net_admin_dev: "{{ trunk_parent }}"
@@ -25,12 +43,15 @@
 - name: "Net: Loosen rp_filter for Public Interface"
   sysctl:
     name: "net.ipv4.conf.{{ net_public_dev }}.rp_filter"
-    value: "2" # Loose mode (allows asymmetric routing if needed)
+    value: "2"
     sysctl_set: yes
+
 # ----------------------------------------------------------------------
 # VERIFY
 # ----------------------------------------------------------------------
 - name: "Normalize: Print Resolution"
   debug:
-    msg: "Node {{ inventory_hostname }} resolved Public Interface to: {{ net_public_dev }}"
-
+    msg: 
+      - "Node: {{ inventory_hostname }} (ID: {{ node_id }})"
+      - "Public: {{ public_ip }}/{{ public_cidr }} (GW: {{ gateway_public }})"
+      - "Private: {{ private_ip }}/{{ private_cidr }}"

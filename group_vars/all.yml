@@ -1,8 +1,39 @@
 # Cluster Settings
 cluster_vip: "192.168.255.50"
-gateway_public: "192.168.130.254"
 
-# Network IDs (Used by the trunk logic)
+# --- NETWORK CONFIGURATION ---
+networks:
+  # Standard /24 Network
+  admin:
+    prefix: "192.168.255"
+    cidr: "24"
+    gateway_octet: "254"
+
+  # Public Network on 172.16.0.0/16
+  # Node ID '11' becomes -> 172.16.0.11/16
+  public:
+    prefix: "172.16.0"    # You still define the first 3 octets
+    cidr: "16"            # But the mask is now configurable
+    gateway_octet: "1"    # Gateway becomes 172.16.0.1
+
+  # Private Network on 172.20.100.0/16
+  # Node ID '11' becomes -> 172.20.100.11/16
+  private:
+    prefix: "172.20.100"
+    cidr: "16"
+    
+  # Internal Network (No Gateway needed typically)
+  internal:
+    prefix: "192.168.100"
+    cidr: "24"          # Can be /24, /16, etc.
+    mtu: "9000"         # OPTIONAL: Jumbo frames are great for storage networks
+# MetalLB LoadBalancer Range
+# This will simply append to the public.prefix
+metallb:
+  range_start: "50"
+  range_end: "60"
+
+# Network IDs (Trunk Mode)
 vlan_ids:
   public: 20
   private: 30
@@ -10,8 +41,8 @@ vlan_ids:
 
 # Addon Versions
 versions:
-  kubernetes: "1.34"        # Major.Minor for Apt Repo
-  kubernetes_full: "1.34.4" # Full patch version for Kubeadm/Kubelet
+  kubernetes: "1.34"
+  kubernetes_full: "1.34.4"
   kube_vip: "v0.9.1"
   pause: "3.10"
   cilium: "1.18.4"
@@ -20,8 +51,8 @@ versions:
   metallb: "v0.15.3"
   gateway_api_crd: "v1.4.0"
   nerdctl: "1.7.7"
-# Default Behavior: All nodes are schedulable (workers) unless overridden
 
+# Default Behavior
 k8s_schedulable: true
 
 cilium_config:
@@ -29,7 +60,7 @@ cilium_config:
   loadbalancer_alg: "maglev"
 
 system_config:
-  enable_swap: false # Explicit toggle
+  enable_swap: false
   install_nerdctl: true
   system_timezone: "America/Chicago"
 

@@ -41,10 +41,10 @@
       [Match]
       Name={{ net_admin_dev }}
       [Network]
-      Address={{ admin_ip }}/24
-      Gateway={{ admin_ip.split('.')[0:3] | join('.') }}.254
+      # Dynamic CIDR usage:
+      Address={{ admin_ip }}/{{ admin_cidr }}
+      Gateway={{ gateway_admin }}
       DNS=1.1.1.1
-      # Attach VLANs if we are the trunk parent
       {% if create_vlans %}
       VLAN={{ net_public_dev }}
       VLAN={{ net_private_dev }}
@@ -52,7 +52,7 @@
       {% endif %}
   notify: Reload Networkd
 
-# --- PUBLIC NETWORK (Table 200) ---
+# --- PUBLIC NETWORK ---
 - name: "Network: Public"
   copy:
     dest: /etc/systemd/network/20-public.network
@@ -60,9 +60,9 @@
       [Match]
       Name={{ net_public_dev }}
       [Network]
-      Address={{ public_ip }}/24
+      Address={{ public_ip }}/{{ public_cidr }}
       
-      # Split Horizon Routing
+      # Split Horizon Routing (Uses calculated gateway)
       [RoutingPolicyRule]
       From={{ public_ip }}/32
       Table=200
@@ -82,8 +82,9 @@
       [Match]
       Name={{ net_private_dev }}
       [Network]
-      Address={{ private_ip }}/24
+      Address={{ private_ip }}/{{ private_cidr }}
   notify: Reload Networkd
+
 
 # --- INTERNAL NETWORK ---
 - name: "Network: Internal"
@@ -92,7 +93,14 @@
     content: |
       [Match]
       Name={{ net_internal_dev }}
+      
       [Network]
-      Address={{ internal_ip }}/24
+      # Dynamic IP and CIDR
+      Address={{ internal_ip }}/{{ internal_cidr }}
+      
+      # Optional: Jumbo Frames (defaults to 1500 if not set in group_vars)
+      # This is highly recommended if this network is used for Ceph/Longhorn
+      MTUBytes={{ networks.internal.mtu | default('1500') }}
+      
+      # We intentionally do NOT set a Gateway here to keep traffic local (Layer 2)
   notify: Reload Networkd
-
