@@ -42,6 +42,11 @@
       --set kubeProxyReplacement=true \
       --set k8sServiceHost={{ cluster_vip }} \
       --set k8sServicePort=6443 \
+      # Explicitly tell Cilium it is the sole provider
+      --set kubeProxyReplacement=true \
+      # Prevents ARP/NDP contention on the gateway IP
+      --set l2announcements.leaseDuration="3s" \
+      --set l2announcements.leaseRenewDuration="1s" \
       --set devices='{{ net_private_dev }}' \
       --set l2announcements.enabled=true \
       --set loadBalancer.algorithm={{ cilium_config.loadbalancer_alg }} \

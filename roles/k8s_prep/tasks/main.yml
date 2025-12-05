@@ -21,7 +21,9 @@
       net.bridge.bridge-nf-call-iptables  = 1
       net.bridge.bridge-nf-call-ip6tables = 1
       net.ipv4.ip_forward                 = 1
-
+      # REQUIRED FOR ISTIO AMBIENT & CILIUM
+      fs.inotify.max_user_watches         = 524288
+      fs.inotify.max_user_instances       = 8192
 - name: "OS: Apply Sysctl"
   command: sysctl --system
 
@@ -99,6 +101,7 @@
     containerd config default > /etc/containerd/config.toml
     sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
     sed -i 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:{{ versions.pause }}"|g' /etc/containerd/config.toml
+    sed -i 's/discard_unpacked_layers = false/discard_unpacked_layers = true/g' /etc/containerd/config.toml
   notify: Restart Containerd
 
 # --- KUBERNETES TOOLS ---

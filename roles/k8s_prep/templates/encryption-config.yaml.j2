@@ -4,7 +4,7 @@ resources:
   - resources:
       - secrets
     providers:
-      - aescbc:
+      - aesgcm:
           keys:
             - name: key1
               secret: "{{ encryption_key }}" # Generate this in Ansible vault
