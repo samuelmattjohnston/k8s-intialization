@@ -5,9 +5,9 @@
     KUBECONFIG: /etc/kubernetes/admin.conf
   tasks:
     # --------------------------------------------------
-    # 1. PRE-REQUISITES (Strict ARP & Security)
+    # 1. PRE-REQUISITES (Strict ARP)
     # --------------------------------------------------
-    - name: Enable strictARP in kube-proxy (Required for MetalLB Layer 2)
+    - name: Enable strictARP in kube-proxy
       shell: |
         kubectl get configmap kube-proxy -n kube-system -o yaml | \
         sed -e "s/strictARP: false/strictARP: true/" | \
@@ -20,15 +20,15 @@
       when: arp_patch.changed
 
     # --------------------------------------------------
-    # 2. INSTALL CALICO (CNI)
+    # 2. INSTALL CALICO (CNI) - Updated v3.29.1
     # --------------------------------------------------
-    - name: Install Calico Operator (Server-Side Apply)
+    - name: Install Calico Operator
       shell: |
-        kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml
+        kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/tigera-operator.yaml
 
     - name: Download Calico Custom Resources
       get_url:
-        url: https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml
+        url: https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/custom-resources.yaml
         dest: /tmp/calico-custom-resources.yaml
 
     - name: Patch Calico CIDR to match Kubeadm (10.244.0.0/16)
@@ -47,26 +47,51 @@
       delay: 10
       until: ds_check.rc == 0
 
-    # CRITICAL: Bind Calico to Private Interface (enX2)
     - name: Patch Calico Autodetection
       shell: |
         kubectl set env daemonset/calico-node -n calico-system IP_AUTODETECTION_METHOD=interface={{ iface_private }}
       retries: 5
       delay: 5
-      register: result
       until: result.rc == 0
+      register: result
 
     - name: Untaint Masters
       shell: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
       ignore_errors: yes
 
     # --------------------------------------------------
-    # 3. INSTALL METALLB (Load Balancer)
+    # 3. INSTALL GATEWAY API (The Modern Interface)
+    # --------------------------------------------------
+    - name: Install Gateway API CRDs (Standard Channel)
+      shell: |
+        kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+
+    # --------------------------------------------------
+    # 4. INSTALL ISTIO (The Controller)
+    # --------------------------------------------------
+    - name: Download Istioctl
+      shell: |
+        curl -L https://istio.io/downloadIstio | sh -
+        mv istio-*/bin/istioctl /usr/local/bin/
+        rm -rf istio-*
+      args:
+        creates: /usr/local/bin/istioctl
+
+    - name: Generate Istio Declarative Config
+      template:
+        src: templates/istio-install-config.yaml.j2
+        dest: /tmp/istio-config.yaml
+
+    - name: Apply Istio Configuration (Declarative)
+      shell: |
+        istioctl install -y -f /tmp/istio-config.yaml
+
+    # --------------------------------------------------
+    # 5. INSTALL METALLB (Load Balancer) - Updated v0.14.9
     # --------------------------------------------------
     - name: Create MetalLB Namespace
       shell: kubectl create namespace metallb-system --dry-run=client -o yaml | kubectl apply -f -
 
-    # CRITICAL: Allow MetalLB Speaker to access raw network sockets (Fixes "Silent Speaker")
     - name: Label MetalLB Namespace for Pod Security
       shell: |
         kubectl label namespace metallb-system \
@@ -77,7 +102,7 @@
 
     - name: Install MetalLB Manifest
       shell: |
-        kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/manifests/metallb-native.yaml
+        kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
         kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
 
     - name: Apply MetalLB Configuration (Pools & Advertisements)
@@ -88,20 +113,13 @@
     - name: Activate MetalLB Pool
       shell: kubectl apply -f /tmp/metallb-config.yaml
 
-    - name: Patch MetalLB Speaker to Ignore Exclusion Label
-      ansible.builtin.shell: |
-        kubectl patch daemonset speaker -n metallb-system --type=json -p='[
-          {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--ignore-exclude-lb"}
-        ]'
-      register: ignore_patch
-      changed_when: "'patched' in ignore_patch.stdout"
     # --------------------------------------------------
-    # 4. INSTALL INGRESS
+    # 6. DEPLOY THE GATEWAY
     # --------------------------------------------------
-    - name: Install Nginx Ingress Controller
-      shell: |
-        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.2/deploy/static/provider/cloud/deploy.yaml
-
-    # Optional: Force Cluster Policy for Immediate Stability (Remove if you strictly require Local)
-    # - name: Patch Ingress Service to Cluster Policy
-    #   shell: kubectl patch svc -n ingress-nginx ingress-nginx-controller -p '{"spec":{"externalTrafficPolicy":"Cluster"}}'
+    - name: Deploy Modern Gateway Resource
+      template:
+        src: templates/gateway.yaml.j2
+        dest: /tmp/gateway.yaml
+      
+    - name: Apply Gateway
+      shell: kubectl apply -f /tmp/gateway.yaml

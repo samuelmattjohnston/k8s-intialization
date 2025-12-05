@@ -24,10 +24,11 @@ spec:
     - name: vip_ddns
       value: "false"
     - name: svc_enable
-      value: "false" # Keep FALSE so it doesn't fight MetalLB
+      value: "false"
     - name: address
       value: "{{ cluster_vip }}"
-    image: ghcr.io/kube-vip/kube-vip:v0.8.0
+    # UPDATED to v0.8.2
+    image: ghcr.io/kube-vip/kube-vip:v0.8.2
     imagePullPolicy: Always
     name: kube-vip
     resources: {}
@@ -46,5 +47,5 @@ spec:
   hostNetwork: true
   volumes:
   - hostPath:
-      path: /etc/kubernetes/admin.conf  # <--- CHANGED BACK FROM super-admin.conf
+      path: /etc/kubernetes/admin.conf
     name: kubeconfig

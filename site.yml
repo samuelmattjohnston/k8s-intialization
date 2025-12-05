@@ -24,21 +24,24 @@
     - name: Apply Sysctl
       command: sysctl --system
 
-    # Fix for missing DNS during bootstrap: Populate /etc/hosts
+    # CRITICAL MODERNIZATION: Disable Swap
+    - name: Disable Swap
+      shell: |
+        swapoff -a
+        sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
     - name: Update /etc/hosts for Local Resolution
       blockinfile:
         path: /etc/hosts
         block: |
           127.0.0.1 localhost
           127.0.1.1 {{ inventory_hostname }}
-          # Cluster Nodes
           {% for host in groups['masters'] %}
           {{ hostvars[host].admin_ip }} {{ host }}
           {% endfor %}
 
     - name: Install Dependencies
       apt:
-        # Added 'conntrack' to fix preflight check failure
         name: [apt-transport-https, ca-certificates, curl, gpg, socat, conntrack]
         state: present
         update_cache: yes
@@ -53,7 +56,7 @@
       args:
         creates: /etc/apt/sources.list.d/docker.list
 
-    - name: Update APT Cache (Explicit)
+    - name: Update APT Cache
       apt:
         update_cache: yes
 
@@ -66,9 +69,7 @@
       shell: |
         mkdir -p /etc/containerd
         containerd config default > /etc/containerd/config.toml
-        # Fix 1: Enable Systemd Cgroups
         sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
-        # Fix 2: Force correct Sandbox Image for K8s 1.31
         sed -i 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:3.10"|g' /etc/containerd/config.toml
       notify: Restart Containerd
 
@@ -96,9 +97,9 @@
     - name: Create Manifest Directory
       file: path=/etc/kubernetes/manifests state=directory
 
-    # Pre-pulling is critical so the Static Pod starts fast enough for kubeadm init
+    # UPDATED: v0.8.2
     - name: Pre-pull Kube-VIP Image
-      command: crictl pull ghcr.io/kube-vip/kube-vip:v0.8.0
+      command: crictl pull ghcr.io/kube-vip/kube-vip:v0.8.2
       register: vip_pull
       retries: 5
       delay: 10
@@ -119,6 +120,7 @@
   handlers:
     - name: Restart Containerd
       service: name=containerd state=restarted
+
 # --- BOOTSTRAP / CHECK MASTER 1 ---
 - hosts: k8s-node-01
   become: yes
@@ -135,6 +137,7 @@
         --upload-certs 
         --apiserver-advertise-address "{{ admin_ip }}" 
         --pod-network-cidr "10.244.0.0/16"
+        --cri-socket unix:///var/run/containerd/containerd.sock
       args:
         creates: /etc/kubernetes/admin.conf
       register: init_output
@@ -146,7 +149,6 @@
         cp /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
         chown -R {{ ansible_user }}:{{ ansible_user }} /home/{{ ansible_user }}/.kube
 
-    # --- DYNAMIC TOKEN REFRESH (Robust Join Strategy) ---
     - name: Get Fresh Join Command
       command: kubeadm token create --print-join-command
       register: join_command_raw
@@ -157,7 +159,6 @@
 
     - name: Set Join Variables
       set_fact:
-        # Extract just the "kubeadm join <ip>:<port>" part and flags
         join_base: "{{ join_command_raw.stdout }}" 
         cert_key: "{{ cert_key_raw.stdout | trim }}"
 
@@ -194,6 +195,5 @@
       when: not joined.stat.exists
 
     - name: Join Cluster
-      # We explicitly pass the Admin IP as the first argument ($1)
       command: "/tmp/join_script.sh {{ admin_ip }}"
       when: not joined.stat.exists

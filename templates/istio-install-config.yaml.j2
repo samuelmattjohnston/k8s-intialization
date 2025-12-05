@@ -1,0 +1,30 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+  name: istio-control-plane
+spec:
+  profile: minimal
+  components:
+    pilot:
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+    # Disable legacy gateways; we use Gateway API
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: false
+    egressGateways:
+    - name: istio-egressgateway
+      enabled: false
+
+  meshConfig:
+    accessLogFile: /dev/stdout
+    enableTracing: true
+    defaultConfig:
+      proxyMetadata:
+        # Essential for Gateway API support
+        ISTIO_META_ENABLE_HBONE: "true"
