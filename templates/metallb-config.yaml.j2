@@ -16,4 +16,13 @@ spec:
   ipAddressPools:
   - public-pool
   interfaces:
-  - {{ iface_public }}
+  # UPDATED: Loops through all masters to find unique public interfaces
+  # This ensures both 'enX1' (VMs) and 'vlan.20' (Bare Metal) are included.
+  {% set unique_interfaces = [] %}
+  {% for host in groups['masters'] %}
+  {% set iface = hostvars[host]['iface_public'] %}
+  {% if iface not in unique_interfaces %}
+  - {{ iface }}
+  {% set _ = unique_interfaces.append(iface) %}
+  {% endif %}
+  {% endfor %}

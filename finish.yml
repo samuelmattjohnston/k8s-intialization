@@ -50,12 +50,12 @@
     # DYNAMIC: Patches autodetection for ALL nodes based on interface name
     - name: Patch Calico Autodetection
       shell: |
-        kubectl set env daemonset/calico-node -n calico-system IP_AUTODETECTION_METHOD=interface={{ iface_private }}
+        kubectl set env daemonset/calico-node -n calico-system IP_AUTODETECTION_METHOD="interface=enX2|vlan.30"
       retries: 5
       delay: 5
       until: result.rc == 0
       register: result
-
+      
     - name: Untaint Masters (Allow workloads on control plane)
       shell: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
       ignore_errors: yes
