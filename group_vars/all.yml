@@ -31,6 +31,7 @@ cilium_config:
 system_config:
   enable_swap: false # Explicit toggle
   install_nerdctl: true
+  system_timezone: "America/Chicago"
 
 # Security
 etcd_encryption_enabled: true

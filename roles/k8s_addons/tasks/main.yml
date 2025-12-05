@@ -203,3 +203,23 @@
         effect: "NoSchedule"
   loop: "{{ groups['masters'] }}"
   when: hostvars[item].k8s_schedulable | default(true) | bool
+
+# ==============================================================================
+# 7. METRICS SERVER (Essential for 'kubectl top')
+# ==============================================================================
+- name: "Metrics: Install High-Availability Metrics Server"
+  kubernetes.core.k8s:
+    state: present
+    src: "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+
+- name: "Metrics: Patch for Insecure Kubelet (Homelab Standard)"
+  # By default, metrics-server expects valid certs on Kubelets. 
+  # In a self-signed homelab, we must pass --kubelet-insecure-tls
+  kubernetes.core.k8s_json_patch:
+    kind: Deployment
+    namespace: kube-system
+    name: metrics-server
+    patch:
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--kubelet-insecure-tls"

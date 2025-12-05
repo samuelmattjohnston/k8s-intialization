@@ -75,9 +75,27 @@
 
 - name: "OS: Install Dependencies"
   apt:
-    name: [apt-transport-https, ca-certificates, curl, gpg, socat, conntrack]
+    name: [apt-transport-https, ca-certificates, curl, gpg, socat, conntrack, systemd-timesyncd]
     state: present
     update_cache: yes
+
+- name: "Time: Ensure systemd-timesyncd is active and enabled"
+  ansible.builtin.service:
+    name: systemd-timesyncd
+    state: started
+    enabled: yes
+
+- name: "Time: Enforce NTP Sync"
+  ansible.builtin.shell: timedatectl set-ntp true
+
+# --- TIMEZONE CONFIGURATION ---
+- name: "Time: Set system timezone"
+  community.general.timezone:
+    name: "{{ system_config.system_timezone }}"
+  # Note: This task uses the 'community.general.timezone' module.
+  # If you don't have the community collection installed, you'll need
+  # to install it on your control machine: 
+  # ansible-galaxy collection install community.general
 
 # --- CONTAINERD ---
 - name: "Containerd: Add Docker Repo"
@@ -179,3 +197,16 @@
     remote_src: yes
     mode: '0755'
   when: system_config.install_nerdctl | bool
+
+# --- SHELL USABILITY ---
+- name: "Shell: Install Bash Completion Package"
+  ansible.builtin.apt:
+    name: bash-completion
+    state: present
+
+- name: "Shell: Enable Kubectl Autocomplete System-Wide"
+  ansible.builtin.shell: "kubectl completion bash > /etc/bash_completion.d/kubectl"
+  args:
+    creates: /etc/bash_completion.d/kubectl
+  # Only do this on masters, as workers don't usually run kubectl commands
+  when: inventory_hostname in groups['masters']

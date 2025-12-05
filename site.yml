@@ -117,3 +117,25 @@
     KUBECONFIG: /etc/kubernetes/admin.conf
   roles:
     - k8s_addons
+
+# ----------------------------------------------------------------------
+# PHASE 5: POST-INSTALL INSTRUCTIONS
+# ----------------------------------------------------------------------
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Installation Complete"
+      debug:
+        msg: |
+          Cluster is ready.
+          
+          To configure your shell on the master node ({{ groups['masters'][0] }}), run:
+            echo 'export KUBECONFIG=/home/{{ hostvars[groups['masters'][0]]['ansible_user'] }}/.kube/config' >> ~/.bashrc
+            echo 'alias k=kubectl' >> ~/.bashrc
+            echo 'complete -o default -F __start_kubectl k' >> ~/.bashrc
+            source ~/.bashrc
+
+          To access the cluster from this machine (if desired), copy the config:
+            mkdir -p ~/.kube
+            scp {{ hostvars[groups['masters'][0]]['ansible_user'] }}@{{ hostvars[groups['masters'][0]]['ansible_host'] }}:/home/{{ hostvars[groups['masters'][0]]['ansible_user'] }}/.kube/config ~/.kube/config
