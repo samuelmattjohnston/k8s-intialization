@@ -1,3 +1,8 @@
+- include_role:
+    name: networking
+    tasks_from: normalize
+  when: net_admin_dev is undefined
+
 # --- OS CONFIGURATION ---
 - name: "OS: Load Kernel Modules"
   copy:
@@ -62,14 +67,14 @@
     mkdir -p /etc/containerd
     containerd config default > /etc/containerd/config.toml
     sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
-    sed -i 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:3.10"|g' /etc/containerd/config.toml
+    sed -i 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:{{ versions.pause }}"|g' /etc/containerd/config.toml
   notify: Restart Containerd
 
 # --- KUBERNETES TOOLS ---
 - name: "K8s: Add Repo"
   shell: |
-    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ versions.kubernetes }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ versions.kubernetes }}/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
   args:
     creates: /etc/apt/sources.list.d/kubernetes.list
 
@@ -90,7 +95,7 @@
   file: path=/etc/kubernetes/manifests state=directory
 
 - name: "HA: Pre-pull Images"
-  command: crictl pull ghcr.io/kube-vip/kube-vip:v0.8.2
+  command: crictl pull ghcr.io/kube-vip/kube-vip:{{ versions.kube_vip }}
   register: vip_pull
   retries: 5
   delay: 10
@@ -102,7 +107,7 @@
     dest: /etc/kubernetes/manifests/kube-vip.yaml
 
 - name: "K8s: Pre-pull Control Plane Images"
-  command: kubeadm config images pull --kubernetes-version v1.31.0
+  command: kubeadm config images pull --kubernetes-version v{{ versions.kubernetes_full }}
   register: k8s_pull
   retries: 5
   delay: 10

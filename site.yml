@@ -50,7 +50,7 @@
     - name: Register Dummy Host for Variables
       add_host:
         name: "K8S_TOKEN_HOLDER"
-        join_base: "{{ join_command_raw.stdout }}"
+        join_base: "{{ join_command_raw.stdout | trim }}"
         cert_key: "{{ cert_key_raw.stdout | trim }}"
 
 # ----------------------------------------------------------------------
@@ -79,20 +79,29 @@
 # ----------------------------------------------------------------------
 - hosts: workers
   become: yes
-  serial: 2 # Workers can join in parallel, it's safer than masters
-  vars:
-    join_base: "{{ hostvars['K8S_TOKEN_HOLDER']['join_base'] }}"
-    # Workers do NOT need the cert_key
+  serial: 2
   tasks:
-    - name: Check if joined
+    - name: "Check if Node is already joined"
       stat: path=/etc/kubernetes/kubelet.conf
-      register: joined
+      register: worker_joined
 
-    - name: Join Worker
+    # -------------------------------------------------------
+    # DYNAMIC TOKEN FETCHING
+    # This runs ON the worker, but delegates execution to the master
+    # -------------------------------------------------------
+    - name: "Fetch Join Command from Master"
+      command: kubeadm token create --print-join-command
+      register: join_command_fetched
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true # Only one worker needs to ask, then we share the variable
+      when: not worker_joined.stat.exists
+
+    - name: "Join Cluster"
       command: >
-        {{ join_base }} 
+        {{ join_command_fetched.stdout }} 
         --apiserver-advertise-address {{ admin_ip }}
-      when: not joined.stat.exists
+      when: not worker_joined.stat.exists
+
 # ----------------------------------------------------------------------
 # PHASE 4: ADDONS (Leader Only)
 # ----------------------------------------------------------------------

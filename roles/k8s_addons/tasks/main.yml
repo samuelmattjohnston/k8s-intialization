@@ -7,8 +7,15 @@
 
 - name: "Tools: Download Cilium CLI"
   get_url:
-    url: https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-amd64
-    dest: /usr/local/bin/cilium
+    url: "https://github.com/cilium/cilium-cli/releases/download/{{ versions.cilium_cli }}/cilium-linux-amd64.tar.gz"
+    dest: /tmp/cilium-cli.tar.gz
+    mode: '0644'
+
+- name: "Tools: Install Cilium CLI"
+  unarchive:
+    src: /tmp/cilium-cli.tar.gz
+    dest: /usr/local/bin
+    remote_src: yes
     mode: '0755'
 
 - name: "Tools: Download Istioctl"
@@ -27,6 +34,19 @@
   kubernetes.core.k8s:
     state: present
     src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ versions.gateway_api }}/standard-install.yaml"
+
+- name: "Gateway API: Wait for CRD (Native)"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+  register: gateway_crd
+  # We check that the resource exists AND that it has the 'Established' condition
+  until: >
+    gateway_crd.resources | length > 0 and
+    (gateway_crd.resources[0].status.conditions | selectattr('type', 'equalto', 'Established') | list | length > 0)
+  retries: 12
+  delay: 5
 
 # ==============================================================================
 # 2. CILIUM (Guarded CLI)
@@ -66,10 +86,12 @@
     dest: /tmp/istio-config.yaml
   when: istio_check.rc != 0
 
-- name: "Istio: Install"
+- name: "Istio: Apply Config (Idempotent)"
   shell: |
     istioctl install -y -f /tmp/istio-config.yaml
-  when: istio_check.rc != 0
+  register: istio_install
+  # Only report 'changed' if the output indicates an update, otherwise it looks like it changed every time
+  changed_when: "'Pruning' in istio_install.stdout or 'Installing' in istio_install.stdout"
 
 # We use the Native Module for the Gateway resource (It's just a K8s Object).
 - name: "Gateway: Apply Resource"

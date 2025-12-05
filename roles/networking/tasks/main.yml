@@ -39,6 +39,7 @@
       VLAN={{ net_private_dev }}
       VLAN={{ net_internal_dev }}
       {% endif %}
+  notify: Reload Networkd
 
 # --- PUBLIC NETWORK (Table 200) ---
 - name: "Network: Public"
@@ -60,6 +61,7 @@
       Destination=0.0.0.0/0
       Gateway={{ gateway_public }}
       Table=200
+  notify: Reload Networkd
 
 # --- PRIVATE NETWORK ---
 - name: "Network: Private"
@@ -70,6 +72,7 @@
       Name={{ net_private_dev }}
       [Network]
       Address={{ private_ip }}/24
+  notify: Reload Networkd
 
 # --- INTERNAL NETWORK ---
 - name: "Network: Internal"
@@ -80,7 +83,5 @@
       Name={{ net_internal_dev }}
       [Network]
       Address={{ internal_ip }}/24
+  notify: Reload Networkd
 
-# 4. APPLY
-- name: "Apply: Reload Networkd"
-  shell: networkctl reload
