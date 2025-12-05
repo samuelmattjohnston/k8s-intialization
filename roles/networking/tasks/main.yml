@@ -1,6 +1,17 @@
 - name: "Install Networking Tools"
   apt: name=systemd-resolved state=present
 
+- name: "Net: Install systemd-networkd (If excluded)"
+  ansible.builtin.apt:
+    name: systemd-networkd
+    state: present
+
+- name: "Net: Enable and Start systemd-networkd"
+  ansible.builtin.service:
+    name: systemd-networkd
+    state: started
+    enabled: yes
+
 # 1. RUN LOGIC ENGINE
 - include_tasks: normalize.yml
 

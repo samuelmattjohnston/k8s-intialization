@@ -18,6 +18,7 @@ versions:
   cilium_cli: "v0.18.9"
   istio: "1.28.1"
   metallb: "v0.15.3"
+  gateway_api_crd: "v1.4.0"
 # Default Behavior: All nodes are schedulable (workers) unless overridden
 k8s_schedulable: true
 
