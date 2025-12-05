@@ -1,0 +1,16 @@
+# Cluster Settings
+cluster_vip: "192.168.255.50"
+gateway_public: "192.168.130.254"
+
+# Network IDs (Used by the trunk logic)
+vlan_ids:
+  public: 20
+  private: 30
+  internal: 40
+
+# Addon Versions
+versions:
+  cilium: "1.16.1"
+  istio: "1.23.0"
+  metallb: "v0.14.9"
+  gateway_api: "v1.1.0"

@@ -1,9 +1,12 @@
 ---
-# --------------------------------------------------
-# PHASE 1: PREPARE ALL NODES (OS & DEPENDENCIES)
-# --------------------------------------------------
+# ----------------------------------------------------------------------
+# PHASE 1: PREPARE ALL NODES
+# ----------------------------------------------------------------------
 - hosts: masters
   become: yes
+  roles:
+    - networking
+  
   tasks:
     # --- OS PREP ---
     - name: Load Kernel Modules
@@ -32,7 +35,6 @@
         swapoff -a
         sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
-    # DYNAMIC: Generates /etc/hosts entries for every node in the 'masters' group
     - name: Update /etc/hosts for Local Resolution
       blockinfile:
         path: /etc/hosts
@@ -96,7 +98,8 @@
         selection: hold
       loop: [kubelet, kubeadm, kubectl]
 
-    # --- KUBE-VIP (HA) ---
+    # --- KUBE-VIP (HA) - MISSING IN YOUR DIFF ---
+    # This must run AFTER networking (to get net_admin_dev) and BEFORE kubeadm init
     - name: Create Manifest Directory
       file: path=/etc/kubernetes/manifests state=directory
 
@@ -109,6 +112,7 @@
       
     - name: Deploy Kube-VIP Static Pod
       template:
+        # This file is in your root templates/ folder (not in a role)
         src: templates/kube-vip.yaml.j2
         dest: /etc/kubernetes/manifests/kube-vip.yaml
 
@@ -123,15 +127,14 @@
     - name: Restart Containerd
       service: name=containerd state=restarted
 
-# --------------------------------------------------
-# PHASE 2: BOOTSTRAP LEADER (First Node in Inventory)
-# --------------------------------------------------
+# ----------------------------------------------------------------------
+# PHASE 2: BOOTSTRAP LEADER
+# ----------------------------------------------------------------------
 - hosts: masters[0]
   become: yes
   tasks:
-    - name: Check if Cluster is already initialized
-      stat:
-        path: /etc/kubernetes/admin.conf
+    - name: Check if Cluster is initialized
+      stat: path=/etc/kubernetes/admin.conf
       register: cluster_admin_conf
 
     - name: Initialize Cluster (Skip Kube-Proxy)
@@ -148,61 +151,55 @@
       register: init_output
       when: not cluster_admin_conf.stat.exists
 
-    - name: Setup Kubeconfig for User
+    - name: Setup Kubeconfig
       shell: |
         mkdir -p /home/{{ ansible_user }}/.kube
         cp /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
         chown -R {{ ansible_user }}:{{ ansible_user }} /home/{{ ansible_user }}/.kube
 
-    - name: Get Fresh Join Command
+    - name: Generate Join Token
       command: kubeadm token create --print-join-command
       register: join_command_raw
 
-    - name: Get Fresh Certificate Key
+    - name: Get Certificate Key
       shell: kubeadm init phase upload-certs --upload-certs | tail -1
       register: cert_key_raw
 
-    - name: Set Join Variables
-      set_fact:
-        join_base: "{{ join_command_raw.stdout }}" 
+    # Store these variables in a dummy host so other plays can read them
+    - name: Register Dummy Host for Variables
+      add_host:
+        name: "K8S_TOKEN_HOLDER"
+        join_base: "{{ join_command_raw.stdout }}"
         cert_key: "{{ cert_key_raw.stdout | trim }}"
 
-    - name: Create Clean Join Script
-      copy:
-        dest: "/tmp/join_script.sh"
-        mode: 0755
-        content: |
-          #!/bin/bash
-          {{ join_base }} \
-          --control-plane \
-          --certificate-key {{ cert_key }} \
-          --apiserver-advertise-address $1
-
-    - name: Fetch Join Script
-      fetch:
-        src: /tmp/join_script.sh
-        dest: ./join_script.sh
-        flat: yes
-
-# --------------------------------------------------
-# PHASE 3: JOIN FOLLOWERS (All Other Nodes)
-# --------------------------------------------------
+# ----------------------------------------------------------------------
+# PHASE 3: JOIN FOLLOWERS
+# ----------------------------------------------------------------------
 - hosts: masters[1:]
   become: yes
-  serial: 1 # Joins one by one to ensure etcd stability
+  serial: 1
+  vars:
+    join_base: "{{ hostvars['K8S_TOKEN_HOLDER']['join_base'] }}"
+    cert_key: "{{ hostvars['K8S_TOKEN_HOLDER']['cert_key'] }}"
   tasks:
-    - name: Check if already joined
+    - name: Check if joined
       stat: path=/etc/kubernetes/kubelet.conf
       register: joined
 
-    - name: Copy Join Script
-      copy:
-        src: ./join_script.sh
-        dest: /tmp/join_script.sh
-        mode: 0755
+    - name: Join Cluster
+      command: >
+        {{ join_base }} 
+        --control-plane 
+        --certificate-key {{ cert_key }} 
+        --apiserver-advertise-address {{ admin_ip }}
       when: not joined.stat.exists
 
-    - name: Join Cluster
-      # Dynamic: We pass this specific node's admin_ip to the script
-      command: "/tmp/join_script.sh {{ admin_ip }}"
-      when: not joined.stat.exists
+# ----------------------------------------------------------------------
+# PHASE 4: ADDONS (Cilium, Istio, MetalLB)
+# ----------------------------------------------------------------------
+- hosts: masters[0]
+  become: yes
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  roles:
+    - k8s_addons

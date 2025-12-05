@@ -13,7 +13,7 @@ spec:
           requests:
             cpu: 200m
             memory: 256Mi
-    # Disable legacy gateways; we use Gateway API
+    # We disable legacy gateways because we use the new Gateway API
     ingressGateways:
     - name: istio-ingressgateway
       enabled: false
@@ -26,5 +26,5 @@ spec:
     enableTracing: true
     defaultConfig:
       proxyMetadata:
-        # Essential for Gateway API support
+        # Essential for Gateway API support in Istio
         ISTIO_META_ENABLE_HBONE: "true"

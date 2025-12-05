@@ -1,0 +1,20 @@
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: public-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.130.51-192.168.130.60
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: public-binding
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - public-pool
+  # We omit the 'interfaces' list here. 
+  # MetalLB will automatically announce on all interfaces that match the pool's subnet.
+  # This is safer than trying to calculate interface names for every node dynamically here.

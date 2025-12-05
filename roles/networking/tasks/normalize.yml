@@ -1,0 +1,30 @@
+# ----------------------------------------------------------------------
+# LOGIC: STANDARD MODE (Discrete NICs)
+# ----------------------------------------------------------------------
+- name: "Normalize: Map Standard Interfaces"
+  set_fact:
+    net_admin_dev: "enX0"
+    net_public_dev: "enX1"
+    net_private_dev: "enX2"
+    net_internal_dev: "enX3"
+    create_vlans: false 
+  when: mode == 'standard'
+
+# ----------------------------------------------------------------------
+# LOGIC: TRUNK MODE (VLANs on Parent)
+# ----------------------------------------------------------------------
+- name: "Normalize: Map Trunk Interfaces"
+  set_fact:
+    net_admin_dev: "{{ trunk_parent }}"
+    net_public_dev: "vlan.{{ vlan_ids.public }}"
+    net_private_dev: "vlan.{{ vlan_ids.private }}"
+    net_internal_dev: "vlan.{{ vlan_ids.internal }}"
+    create_vlans: true
+  when: mode == 'trunk'
+
+# ----------------------------------------------------------------------
+# VERIFY
+# ----------------------------------------------------------------------
+- name: "Normalize: Print Resolution"
+  debug:
+    msg: "Node {{ inventory_hostname }} resolved Public Interface to: {{ net_public_dev }}"

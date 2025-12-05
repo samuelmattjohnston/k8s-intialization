@@ -1,0 +1,96 @@
+# ==============================================================================
+# 0. SETUP & TOOLS
+# ==============================================================================
+- include_role:
+    name: networking
+    tasks_from: normalize
+
+- name: "Tools: Download Cilium CLI"
+  get_url:
+    url: https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-amd64
+    dest: /usr/local/bin/cilium
+    mode: '0755'
+
+- name: "Tools: Download Istioctl"
+  unarchive:
+    src: "https://github.com/istio/istio/releases/download/{{ versions.istio }}/istio-{{ versions.istio }}-linux-amd64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: yes
+    extra_opts: ["--strip-components=1", "istio-{{ versions.istio }}/bin/istioctl"]
+    creates: /usr/local/bin/istioctl
+
+# ==============================================================================
+# 1. GATEWAY API (Native Module)
+# ==============================================================================
+# "Just apply this URL." No shell command needed.
+- name: "Gateway API: Install CRDs"
+  kubernetes.core.k8s:
+    state: present
+    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ versions.gateway_api }}/standard-install.yaml"
+
+# ==============================================================================
+# 2. CILIUM (Guarded CLI)
+# ==============================================================================
+# We use the CLI because it calculates certificates and settings dynamically.
+- name: "Cilium: Check Status"
+  command: cilium status --wait=false
+  register: cilium_check
+  failed_when: false
+  changed_when: false
+
+- name: "Cilium: Install"
+  shell: |
+    cilium install \
+      --version {{ versions.cilium }} \
+      --set kubeProxyReplacement=true \
+      --set k8sServiceHost={{ cluster_vip }} \
+      --set k8sServicePort=6443 \
+      --set devices='{{ net_private_dev }}' \
+      --set l2announcements.enabled=true \
+      --wait
+  when: cilium_check.rc != 0
+
+# ==============================================================================
+# 3. ISTIO (Guarded CLI + Native Config)
+# ==============================================================================
+# We use the CLI for the control plane installation to avoid managing massive YAMLs.
+- name: "Istio: Check Control Plane"
+  command: kubectl get deployment istiod -n istio-system
+  register: istio_check
+  failed_when: false
+  changed_when: false
+
+- name: "Istio: Stage Config"
+  template:
+    src: istio-config.yaml.j2
+    dest: /tmp/istio-config.yaml
+  when: istio_check.rc != 0
+
+- name: "Istio: Install"
+  shell: |
+    istioctl install -y -f /tmp/istio-config.yaml
+  when: istio_check.rc != 0
+
+# We use the Native Module for the Gateway resource (It's just a K8s Object).
+- name: "Gateway: Apply Resource"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'gateway.yaml.j2') }}"
+
+# ==============================================================================
+# 4. METALLB (Native Module)
+# ==============================================================================
+# MetalLB is just a standard manifest. No CLI wizardry needed.
+- name: "MetalLB: Install"
+  kubernetes.core.k8s:
+    state: present
+    src: "https://raw.githubusercontent.com/metallb/metallb/{{ versions.metallb }}/config/manifests/metallb-native.yaml"
+
+- name: "MetalLB: Wait for Controller"
+  command: kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
+  changed_when: false
+
+- name: "MetalLB: Apply Pool Config"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'metallb-config.yaml.j2') }}"

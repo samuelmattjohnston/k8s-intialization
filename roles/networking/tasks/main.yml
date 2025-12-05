@@ -1,0 +1,86 @@
+- name: "Install Networking Tools"
+  apt: name=systemd-resolved state=present
+
+# 1. RUN LOGIC ENGINE
+- include_tasks: normalize.yml
+
+# 2. CREATE VLAN HARDWARE (Trunk Only)
+- name: "NetDev: Create VLANs"
+  copy:
+    dest: "/etc/systemd/network/10-{{ item.dev }}.netdev"
+    content: |
+      [NetDev]
+      Name={{ item.dev }}
+      Kind=vlan
+      [VLAN]
+      Id={{ item.id }}
+  loop:
+    - { dev: "{{ net_public_dev }}", id: "{{ vlan_ids.public }}" }
+    - { dev: "{{ net_private_dev }}", id: "{{ vlan_ids.private }}" }
+    - { dev: "{{ net_internal_dev }}", id: "{{ vlan_ids.internal }}" }
+  when: create_vlans | bool
+
+# 3. APPLY NETWORK CONFIGURATION (Identical for all nodes)
+
+# --- ADMIN NETWORK ---
+- name: "Network: Admin"
+  copy:
+    dest: /etc/systemd/network/20-admin.network
+    content: |
+      [Match]
+      Name={{ net_admin_dev }}
+      [Network]
+      Address={{ admin_ip }}/24
+      Gateway={{ admin_ip.split('.')[0:3] | join('.') }}.254
+      DNS=1.1.1.1
+      # Attach VLANs if we are the trunk parent
+      {% if create_vlans %}
+      VLAN={{ net_public_dev }}
+      VLAN={{ net_private_dev }}
+      VLAN={{ net_internal_dev }}
+      {% endif %}
+
+# --- PUBLIC NETWORK (Table 200) ---
+- name: "Network: Public"
+  copy:
+    dest: /etc/systemd/network/20-public.network
+    content: |
+      [Match]
+      Name={{ net_public_dev }}
+      [Network]
+      Address={{ public_ip }}/24
+      
+      # Split Horizon Routing
+      [RoutingPolicyRule]
+      From={{ public_ip }}/32
+      Table=200
+      Priority=200
+
+      [Route]
+      Destination=0.0.0.0/0
+      Gateway={{ gateway_public }}
+      Table=200
+
+# --- PRIVATE NETWORK ---
+- name: "Network: Private"
+  copy:
+    dest: /etc/systemd/network/20-private.network
+    content: |
+      [Match]
+      Name={{ net_private_dev }}
+      [Network]
+      Address={{ private_ip }}/24
+
+# --- INTERNAL NETWORK ---
+- name: "Network: Internal"
+  copy:
+    dest: /etc/systemd/network/20-internal.network
+    content: |
+      [Match]
+      Name={{ net_internal_dev }}
+      [Network]
+      Address={{ internal_ip }}/24
+
+# 4. APPLY
+- name: "Apply: Reload Networkd"
+  shell: networkctl reload

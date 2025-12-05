@@ -13,8 +13,9 @@ spec:
       value: "true"
     - name: port
       value: "6443"
+    # UPDATED: Uses the variable from roles/networking/tasks/normalize.yml
     - name: vip_interface
-      value: "{{ iface_admin }}"
+      value: "{{ net_admin_dev }}"
     - name: vip_cidr
       value: "32"
     - name: cp_enable
@@ -27,7 +28,6 @@ spec:
       value: "false"
     - name: address
       value: "{{ cluster_vip }}"
-    # UPDATED to v0.8.2
     image: ghcr.io/kube-vip/kube-vip:v0.8.2
     imagePullPolicy: Always
     name: kube-vip
