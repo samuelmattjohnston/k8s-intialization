@@ -1,0 +1,36 @@
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "{{ admin_ip }}"
+  bindPort: 6443
+nodeRegistration:
+  criSocket: "unix:///var/run/containerd/containerd.sock"
+  kubeletExtraArgs:
+    node-ip: "{{ admin_ip }}"
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: "v{{ versions.kubernetes_full }}"
+controlPlaneEndpoint: "{{ cluster_vip }}:6443"
+networking:
+  podSubnet: "10.244.0.0/16"
+apiServer:
+  extraArgs:
+    # CONDITIONAL ENCRYPTION
+    {% if etcd_encryption_enabled | bool %}
+    encryption-provider-config: "/etc/kubernetes/encryption-config.yaml"
+    {% endif %}
+controllerManager: {}
+scheduler: {}
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+# CONDITIONAL SWAP
+{% if system_config.enable_swap | bool %}
+failSwapOn: false
+memorySwap:
+  swapBehavior: LimitedSwap
+{% else %}
+failSwapOn: true
+{% endif %}

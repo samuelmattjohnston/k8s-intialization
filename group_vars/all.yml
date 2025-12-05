@@ -19,7 +19,18 @@ versions:
   istio: "1.28.1"
   metallb: "v0.15.3"
   gateway_api_crd: "v1.4.0"
+  nerdctl: "1.7.7"
 # Default Behavior: All nodes are schedulable (workers) unless overridden
+
 k8s_schedulable: true
 
+cilium_config:
+  bpf_masquerade: true
+  loadbalancer_alg: "maglev"
 
+system_config:
+  enable_swap: false # Explicit toggle
+  install_nerdctl: true
+
+# Security
+etcd_encryption_enabled: true

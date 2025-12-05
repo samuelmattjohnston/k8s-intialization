@@ -25,10 +25,41 @@
 - name: "OS: Apply Sysctl"
   command: sysctl --system
 
+# --- SWAP LOGIC ---
+# Only run this if swap is explicitly DISABLED
 - name: "OS: Disable Swap"
   shell: |
     swapoff -a
     sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+  when: not system_config.enable_swap | bool
+
+# Only run these if swap is ENABLED
+- name: "Swap: Create 1G Swapfile"
+  shell: |
+    dd if=/dev/zero of=/swapfile bs=1M count=1024
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+  args:
+    creates: /swapfile
+  when: system_config.enable_swap | bool
+
+- name: "Swap: Persist in fstab"
+  mount:
+    path: none
+    src: /swapfile
+    fstype: swap
+    opts: sw
+    state: present
+  when: system_config.enable_swap | bool
+
+- name: "Swap: Tune Swappiness"
+  sysctl:
+    name: vm.swappiness
+    value: '1'
+    state: present
+    reload: yes
+  when: system_config.enable_swap | bool
 
 - name: "OS: Update /etc/hosts"
   blockinfile:
@@ -112,3 +143,36 @@
   retries: 5
   delay: 10
   until: k8s_pull.rc == 0
+
+# --- SECURITY LOGIC ---
+- name: "Security: Generate Etcd Encryption Key"
+  set_fact:
+    encryption_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') | b64encode }}"
+  run_once: true
+  when: etcd_encryption_enabled | bool
+
+- name: "Security: Create Encryption Config"
+  template:
+    src: encryption-config.yaml.j2
+    dest: /etc/kubernetes/encryption-config.yaml
+    mode: '0600'
+  when: etcd_encryption_enabled | bool
+
+# --- NERDCTL LOGIC (Versioned) ---
+- name: "Tools: Download Nerdctl Full Tarball"
+  get_url:
+    # Uses the version variable now
+    url: "https://github.com/containerd/nerdctl/releases/download/v{{ versions.nerdctl }}/nerdctl-full-{{ versions.nerdctl }}-linux-amd64.tar.gz"
+    dest: /tmp/nerdctl.tar.gz
+    mode: '0644'
+  when: system_config.install_nerdctl | bool
+
+- name: "Tools: Install Nerdctl Binary Only"
+  unarchive:
+    src: /tmp/nerdctl.tar.gz
+    dest: /usr/local/bin
+    include: ['bin/nerdctl']
+    extra_opts: ['--strip-components=1']
+    remote_src: yes
+    mode: '0755'
+  when: system_config.install_nerdctl | bool

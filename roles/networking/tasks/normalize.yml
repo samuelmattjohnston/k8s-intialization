@@ -22,9 +22,15 @@
     create_vlans: true
   when: mode == 'trunk'
 
+- name: "Net: Loosen rp_filter for Public Interface"
+  sysctl:
+    name: "net.ipv4.conf.{{ net_public_dev }}.rp_filter"
+    value: "2" # Loose mode (allows asymmetric routing if needed)
+    sysctl_set: yes
 # ----------------------------------------------------------------------
 # VERIFY
 # ----------------------------------------------------------------------
 - name: "Normalize: Print Resolution"
   debug:
     msg: "Node {{ inventory_hostname }} resolved Public Interface to: {{ net_public_dev }}"
+
