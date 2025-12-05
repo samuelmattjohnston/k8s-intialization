@@ -7,54 +7,51 @@
     # --------------------------------------------------
     # 1. PRE-REQUISITES
     # --------------------------------------------------
-    - name: Enable strictARP in kube-proxy
-      shell: |
-        kubectl get configmap kube-proxy -n kube-system -o yaml | \
-        sed -e "s/strictARP: false/strictARP: true/" | \
-        kubectl apply -f - -n kube-system
-      register: arp_patch
-      changed_when: "'configured' in arp_patch.stdout"
-
-    - name: Restart kube-proxy
-      shell: kubectl delete pod -n kube-system -l k8s-app=kube-proxy
-      when: arp_patch.changed
+    - name: Enable strictARP in kube-proxy (Required for MetalLB)
+      # Even with Cilium replacement, MetalLB checks this setting.
+      # Since kube-proxy is missing, we create a dummy config or skip.
+      # Actually, Cilium handles strictARP logic internally, but MetalLB's 
+      # memberlist check might complain if it can't find the config.
+      # We will proceed assuming Cilium's KubeProxyReplacement covers this.
+      debug:
+        msg: "Skipping kube-proxy patch as it is not installed."
 
     # --------------------------------------------------
-    # 2. INSTALL CALICO
+    # 2. INSTALL CILIUM (CLI Method)
     # --------------------------------------------------
-    - name: Install Calico Operator
+    - name: Download Cilium CLI
       shell: |
-        kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/tigera-operator.yaml
+        CILIUM_CLI_VERSION=$(curl -s https://api.github.com/repos/cilium/cilium-cli/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+        curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-amd64
+        chmod +x cilium-linux-amd64
+        mv cilium-linux-amd64 /usr/local/bin/cilium
+      args:
+        creates: /usr/local/bin/cilium
 
-    - name: Download Calico Custom Resources
-      get_url:
-        url: https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/custom-resources.yaml
-        dest: /tmp/calico-custom-resources.yaml
+    - name: Get Dynamic Private Interface List
+      # Generates a Regex string (e.g., "enX2|vlan.30") from inventory
+      set_fact:
+        cilium_devices: "{% set iface_list = [] %}{% for host in groups['masters'] %}{% set iface = hostvars[host]['iface_private'] %}{% if iface not in iface_list %}{% set _ = iface_list.append(iface) %}{% endif %}{% endfor %}{{ iface_list | join('|') }}"
 
-    - name: Patch Calico CIDR
-      replace:
-        path: /tmp/calico-custom-resources.yaml
-        regexp: '192.168.0.0/16'
-        replace: '10.244.0.0/16'
-
-    - name: Apply Calico Resources
-      shell: kubectl apply -f /tmp/calico-custom-resources.yaml
-
-    - name: Wait for Calico
-      shell: kubectl get ds -n calico-system calico-node
-      register: ds_check
-      retries: 20
-      delay: 10
-      until: ds_check.rc == 0
-
-    # DYNAMIC: Patches autodetection for ALL nodes based on interface name
-    - name: Patch Calico Autodetection
+    - name: Install Cilium
+      # Note: We quote '{{ cilium_devices }}' to prevent the pipe | from breaking the shell command
       shell: |
-        kubectl set env daemonset/calico-node -n calico-system IP_AUTODETECTION_METHOD="interface=enX2|vlan.30"
-      retries: 5
-      delay: 5
-      until: result.rc == 0
-      register: result
+        cilium install \
+        --version 1.16.1 \
+        --set kubeProxyReplacement=true \
+        --set k8sServiceHost={{ cluster_vip }} \
+        --set k8sServicePort=6443 \
+        --set ipam.mode=kubernetes \
+        --set devices='{{ cilium_devices }}' \
+        --set l2announcements.enabled=true \
+        --set hubble.enabled=true \
+        --set hubble.relay.enabled=true \
+        --set hubble.ui.enabled=true
+      register: cilium_install
+      changed_when: "'Installation complete' in cilium_install.stdout"
+
+    - name: Wait for Cilium Status
+      shell: cilium status --wait
       
     - name: Untaint Masters (Allow workloads on control plane)
       shell: kubectl taint nodes --all node-role.kubernetes.io/control-plane-

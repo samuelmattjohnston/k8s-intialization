@@ -134,7 +134,7 @@
         path: /etc/kubernetes/admin.conf
       register: cluster_admin_conf
 
-    - name: Initialize Cluster (Only if not exists)
+    - name: Initialize Cluster (Skip Kube-Proxy)
       command: >
         kubeadm init 
         --control-plane-endpoint "{{ cluster_vip }}:6443" 
@@ -142,6 +142,7 @@
         --apiserver-advertise-address "{{ admin_ip }}" 
         --pod-network-cidr "10.244.0.0/16"
         --cri-socket unix:///var/run/containerd/containerd.sock
+        --skip-phases=addon/kube-proxy
       args:
         creates: /etc/kubernetes/admin.conf
       register: init_output
