@@ -4,8 +4,7 @@ metadata:
   name: main-gateway
   namespace: istio-system
   annotations:
-    # Tells MetalLB to use the same IP for TCP/UDP if needed, 
-    # and ensures integration between Istio's generated Service and MetalLB
+    # This annotation ensures MetalLB sees the Service that Istio automatically creates
     metallb.universe.tf/allow-shared-ip: "istio-gateway"
 spec:
   gatewayClassName: istio
@@ -25,5 +24,4 @@ spec:
     tls:
       mode: Terminate
       certificateRefs:
-      # Placeholder: You will need to create this Secret or use Cert-Manager later
       - name: default-cert

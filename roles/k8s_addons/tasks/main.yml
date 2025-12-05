@@ -27,31 +27,8 @@
     creates: /usr/local/bin/istioctl
 
 # ==============================================================================
-# 1. GATEWAY API (Native Module)
+# 1. CILIUM (CNI Layer)
 # ==============================================================================
-# "Just apply this URL." No shell command needed.
-- name: "Gateway API: Install CRDs"
-  kubernetes.core.k8s:
-    state: present
-    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ versions.gateway_api }}/standard-install.yaml"
-
-- name: "Gateway API: Wait for CRD (Native)"
-  kubernetes.core.k8s_info:
-    api_version: apiextensions.k8s.io/v1
-    kind: CustomResourceDefinition
-    name: gateways.gateway.networking.k8s.io
-  register: gateway_crd
-  # We check that the resource exists AND that it has the 'Established' condition
-  until: >
-    gateway_crd.resources | length > 0 and
-    (gateway_crd.resources[0].status.conditions | selectattr('type', 'equalto', 'Established') | list | length > 0)
-  retries: 12
-  delay: 5
-
-# ==============================================================================
-# 2. CILIUM (Guarded CLI)
-# ==============================================================================
-# We use the CLI because it calculates certificates and settings dynamically.
 - name: "Cilium: Check Status"
   command: cilium status --wait=false
   register: cilium_check
@@ -71,9 +48,8 @@
   when: cilium_check.rc != 0
 
 # ==============================================================================
-# 3. ISTIO (Guarded CLI + Native Config)
+# 2. ISTIO (Controller + CRDs)
 # ==============================================================================
-# We use the CLI for the control plane installation to avoid managing massive YAMLs.
 - name: "Istio: Check Control Plane"
   command: kubectl get deployment istiod -n istio-system
   register: istio_check
@@ -86,23 +62,55 @@
     dest: /tmp/istio-config.yaml
   when: istio_check.rc != 0
 
-- name: "Istio: Apply Config (Idempotent)"
+# Istio Install runs here. This includes the 'base' component which has the CRDs.
+- name: "Istio: Install Ambient Mesh"
   shell: |
     istioctl install -y -f /tmp/istio-config.yaml
   register: istio_install
-  # Only report 'changed' if the output indicates an update, otherwise it looks like it changed every time
   changed_when: "'Pruning' in istio_install.stdout or 'Installing' in istio_install.stdout"
 
-# We use the Native Module for the Gateway resource (It's just a K8s Object).
+# MOVED: We now wait for the CRDs that Istio just installed.
+- name: "Gateway API: Wait for CRD (Native)"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+  register: gateway_crd
+  until: >
+    gateway_crd.resources | length > 0 and
+    (gateway_crd.resources[0].status.conditions | selectattr('type', 'equalto', 'Established') | list | length > 0)
+  retries: 20
+  delay: 5
+
+# ==============================================================================
+# 3. ACTIVATE AMBIENT MODE
+# ==============================================================================
+- name: "Istio: Enable Ambient Mode for Default Namespace"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: default
+    merge_type: merge
+    definition:
+      metadata:
+        labels:
+          istio.io/dataplane-mode: ambient
+
+# ==============================================================================
+# 4. GATEWAY RESOURCE
+# ==============================================================================
 - name: "Gateway: Apply Resource"
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', 'gateway.yaml.j2') }}"
 
+# We wait for Istio to auto-provision the Deployment before MetalLB starts
+- name: "Gateway: Wait for Provisioning"
+  command: kubectl wait --namespace istio-system --for=condition=ready pod --selector=istio.io/gateway-name=main-gateway --timeout=120s
+  changed_when: false
+
 # ==============================================================================
-# 4. METALLB (Native Module)
+# 5. METALLB (Native Module)
 # ==============================================================================
-# MetalLB is just a standard manifest. No CLI wizardry needed.
 - name: "MetalLB: Install"
   kubernetes.core.k8s:
     state: present
@@ -118,7 +126,7 @@
     definition: "{{ lookup('template', 'metallb-config.yaml.j2') }}"
 
 # ==============================================================================
-# 5. NODE TAINTS
+# 6. NODE TAINTS
 # ==============================================================================
 - name: "Taint: Ensure Masters are Schedulable"
   kubernetes.core.k8s_taint:
@@ -128,5 +136,4 @@
       - key: "node-role.kubernetes.io/control-plane"
         effect: "NoSchedule"
   loop: "{{ groups['masters'] }}"
-  # Only untaint if the variable is true (default)
   when: hostvars[item].k8s_schedulable | default(true) | bool

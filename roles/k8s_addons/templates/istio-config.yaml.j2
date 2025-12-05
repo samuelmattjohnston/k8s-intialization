@@ -4,7 +4,7 @@ metadata:
   namespace: istio-system
   name: istio-control-plane
 spec:
-  profile: minimal
+  profile: ambient
   components:
     pilot:
       enabled: true
@@ -13,18 +13,9 @@ spec:
           requests:
             cpu: 200m
             memory: 256Mi
-    # We disable legacy gateways because we use the new Gateway API
     ingressGateways:
     - name: istio-ingressgateway
       enabled: false
     egressGateways:
     - name: istio-egressgateway
       enabled: false
-
-  meshConfig:
-    accessLogFile: /dev/stdout
-    enableTracing: true
-    defaultConfig:
-      proxyMetadata:
-        # Essential for Gateway API support in Istio
-        ISTIO_META_ENABLE_HBONE: "true"

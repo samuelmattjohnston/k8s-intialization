@@ -98,7 +98,7 @@
 
     - name: "Join Cluster"
       command: >
-        {{ join_command_fetched.stdout }} 
+        {{ join_command_fetched.stdout | trim }} 
         --apiserver-advertise-address {{ admin_ip }}
       when: not worker_joined.stat.exists
 
