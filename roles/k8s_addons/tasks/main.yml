@@ -86,6 +86,19 @@
   register: istio_install
   changed_when: "'Pruning' in istio_install.stdout or 'Installing' in istio_install.stdout"
 
+- name: "Audit: Verify Istio CNI Chaining"
+  shell: |
+    # Look for any CNI configuration list file
+    # Then grep to see if 'istio-cni' has been added to the plugins list
+    grep -r "istio-cni" /etc/cni/net.d/
+  register: cni_chain_check
+  changed_when: false
+  failed_when: cni_chain_check.rc != 0
+  # We delay briefly to ensure the CNI node agent has had time to patch the file
+  retries: 5
+  delay: 5
+  until: cni_chain_check.rc == 0
+
 - name: "Istio: Wait for Ztunnel"
   kubernetes.core.k8s_info:
     kind: DaemonSet
