@@ -1,0 +1,214 @@
+---
+- name: "Cluster Validation Suite"
+  hosts: masters[0]
+  become: yes
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  vars:
+    test_ns: "validation-test"
+    test_domain: "smoke.test.local"
+
+  tasks:
+    # ==========================================================================
+    # PHASE 1: INFRASTRUCTURE HEALTH
+    # ==========================================================================
+    - name: "Health: Check Node Status"
+      shell: kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}'
+      register: node_status
+      failed_when: "'False' in node_status.stdout or 'Unknown' in node_status.stdout"
+      changed_when: false
+
+    - name: "Health: Verify Critical DaemonSets"
+      kubernetes.core.k8s_info:
+        kind: DaemonSet
+        namespace: "{{ item.ns }}"
+        name: "{{ item.name }}"
+      register: ds_status
+      loop:
+        - { name: "cilium", ns: "kube-system" }
+        - { name: "ztunnel", ns: "istio-system" }
+        - { name: "speaker", ns: "metallb-system" } # Added based on your output
+      failed_when: >
+        ds_status.resources | length == 0 or
+        ds_status.resources[0].status.numberReady < ds_status.resources[0].status.desiredNumberScheduled
+
+    - name: "Health: Verify Kube-VIP (Static Pods)"
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: kube-system
+      register: vip_pods
+      # Matches kube-vip-k8s-node-01, etc.
+      failed_when: >
+        vip_pods.resources | selectattr('metadata.name', 'match', '^kube-vip.*') | selectattr('status.phase', 'equalto', 'Running') | list | length == 0
+
+    - name: "Health: Verify Control Plane Deployments"
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: "{{ item.ns }}"
+        name: "{{ item.name }}"
+      register: deploy_status
+      loop:
+        - { name: "istiod", ns: "istio-system" }
+        - { name: "controller", ns: "metallb-system" } # FIXED: Matches your kubectl output
+      failed_when: >
+        deploy_status.resources | length == 0 or
+        deploy_status.resources[0].status.availableReplicas | default(0) < 1
+
+    # ==========================================================================
+    # PHASE 2: GATEWAY & IP ASSIGNMENT
+    # ==========================================================================
+    - name: "Ingress: Verify Gateway Class is Accepted"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: GatewayClass
+        name: istio
+      register: gw_class
+      failed_when: >
+        gw_class.resources | length == 0 or
+        gw_class.resources[0].status.conditions | selectattr('type', 'equalto', 'Accepted') | selectattr('status', 'equalto', 'True') | list | length == 0
+
+    - name: "Ingress: Verify Main Gateway has MetalLB IP"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: Gateway
+        namespace: istio-system
+        name: main-gateway
+      register: gateway_info
+      failed_when: >
+        gateway_info.resources | length == 0 or
+        gateway_info.resources[0].status.addresses is not defined or
+        gateway_info.resources[0].status.addresses | length == 0
+
+    - name: "Ingress: Capture Gateway IP"
+      set_fact:
+        gateway_ip: "{{ gateway_info.resources[0].status.addresses[0].value }}"
+
+    - name: "Debug: Show Gateway IP"
+      debug:
+        msg: "MetalLB assigned IP {{ gateway_ip }} to the Istio Gateway."
+
+    # ==========================================================================
+    # PHASE 3: SMOKE TEST (Ambient Mode)
+    # ==========================================================================
+    - name: "Test: Create Namespace (Ambient Enabled)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ test_ns }}"
+            labels:
+              istio.io/dataplane-mode: ambient
+
+    - name: "Test: Deploy Httpbin (Server)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: httpbin
+            namespace: "{{ test_ns }}"
+            labels:
+              app: httpbin
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: httpbin
+            template:
+              metadata:
+                labels:
+                  app: httpbin
+              spec:
+                containers:
+                - name: httpbin
+                  image: mccutchen/go-httpbin
+                  ports:
+                  - containerPort: 8080
+
+    - name: "Test: Deploy Service"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: httpbin
+            namespace: "{{ test_ns }}"
+          spec:
+            selector:
+              app: httpbin
+            ports:
+            - port: 80
+              targetPort: 8080
+
+    - name: "Test: Deploy HTTPRoute (Gateway API)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: HTTPRoute
+          metadata:
+            name: httpbin-route
+            namespace: "{{ test_ns }}"
+          spec:
+            parentRefs:
+            - name: main-gateway
+              namespace: istio-system
+            hostnames:
+            - "{{ test_domain }}"
+            rules:
+            - matches:
+              - path:
+                  type: PathPrefix
+                  value: /
+              backendRefs:
+              - name: httpbin
+                port: 80
+
+    - name: "Test: Wait for Pod Ready"
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ test_ns }}"
+        label_selectors:
+          - app=httpbin
+      register: pod_info
+      until: >
+        pod_info.resources | length > 0 and
+        pod_info.resources[0].status.phase == "Running"
+      retries: 30
+      delay: 2
+
+    # ==========================================================================
+    # PHASE 4: TRAFFIC VERIFICATION
+    # ==========================================================================
+    - name: "Verify: CURL via MetalLB VIP -> Istio -> Ztunnel -> Pod"
+      uri:
+        url: "http://{{ gateway_ip }}/headers"
+        headers:
+          Host: "{{ test_domain }}"
+        return_content: yes
+        status_code: 200
+      register: curl_result
+      retries: 10
+      delay: 3
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: "Result: Display Success"
+      debug:
+        msg:
+          - "SUCCESS: Traffic successfully routed through the Ambient Mesh."
+          - "Gateway IP: {{ gateway_ip }}"
+          - "Host Header: {{ test_domain }}"
+          - "Server Response Code: {{ curl_result.status }}"
+
+    # ==========================================================================
+    # PHASE 5: CLEANUP
+    # ==========================================================================
+    - name: "Cleanup: Remove Test Namespace"
+      kubernetes.core.k8s:
+        state: absent
+        kind: Namespace
+        name: "{{ test_ns }}"

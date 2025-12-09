@@ -1,0 +1,23 @@
+---
+- name: Run the reset script on all hosts
+  hosts: all  # Assumes you want to target the 'all' group
+  become: true  # This is the equivalent of 'sudo'
+
+  tasks:
+    - name: Execute the reset.sh script
+      # The script module transfers the script to the remote host and executes it.
+      # The path provided is the path to the script on your local Ansible control machine.
+      script: ./reset.sh
+      args:
+        # Use 'chdir' if the script needs to run from a specific directory on the remote host
+        # chdir: /tmp/
+      register: script_output
+
+    - name: Display script output (optional)
+      debug:
+        var: script_output.stdout_lines
+    - name: "Net: Ensure Networkd is running"
+      service:
+        name: systemd-networkd
+        state: restarted
+

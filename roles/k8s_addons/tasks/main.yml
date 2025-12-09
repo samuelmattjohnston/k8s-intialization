@@ -1,0 +1,204 @@
+# ==============================================================================
+# 0. SETUP & TOOLS
+# ==============================================================================
+- include_role:
+    name: networking
+    tasks_from: normalize
+
+- name: "Tools: Download Istioctl Tarball"
+  get_url:
+    url: "https://github.com/istio/istio/releases/download/{{ versions.istio }}/istio-{{ versions.istio }}-linux-amd64.tar.gz"
+    dest: /tmp/istio.tar.gz
+    mode: '0644'
+
+- name: "Tools: Extract Istioctl to Temp"
+  unarchive:
+    src: /tmp/istio.tar.gz
+    dest: /tmp
+    remote_src: yes
+
+- name: "Tools: Install Istioctl Binary"
+  copy:
+    src: "/tmp/istio-{{ versions.istio }}/bin/istioctl"
+    dest: /usr/local/bin/istioctl
+    mode: '0755'
+    remote_src: yes
+
+
+# ==============================================================================
+# 2. METALLB (Layer 2) - MOVED UP
+# Must run BEFORE Gateway Resource creation so the LB Controller exists
+# ==============================================================================
+- name: "MetalLB: Install"
+  kubernetes.core.k8s:
+    state: present
+    src: "https://raw.githubusercontent.com/metallb/metallb/{{ versions.metallb }}/config/manifests/metallb-native.yaml"
+
+- name: "MetalLB: Wait for Controller"
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: metallb-system
+    label_selectors:
+      - app=metallb
+  register: metallb_pods
+  until: >
+    metallb_pods.resources | length > 0 and
+    (metallb_pods.resources[0].status.conditions | default([]) | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length > 0)
+  retries: 30
+  delay: 10
+
+- name: "MetalLB: Apply Pool Config"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'metallb-config.yaml.j2') }}"
+
+# ==============================================================================
+# 3. GATEWAY API CRDs
+# ==============================================================================
+- name: "Gateway API: Install CRDs"
+  kubernetes.core.k8s:
+    state: present
+    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ versions.gateway_api_crd }}/standard-install.yaml"
+
+- name: "Gateway API: Wait for CRD"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+  register: gateway_crd
+  until: >
+    gateway_crd.resources | length > 0 and
+    (gateway_crd.resources[0].status.conditions | selectattr('type', 'equalto', 'Established') | list | length > 0)
+  retries: 20
+  delay: 5
+
+# ==============================================================================
+# 4. ISTIO (Controller + Ztunnel)
+# ==============================================================================
+- name: "Istio: Check Control Plane"
+  command: kubectl get deployment istiod -n istio-system
+  register: istio_check
+  failed_when: false
+  changed_when: false
+
+- name: "Istio: Stage Config"
+  template:
+    src: istio-config.yaml.j2
+    dest: /tmp/istio-config.yaml
+  when: istio_check.rc != 0
+
+- name: "Istio: Install Ambient Mesh"
+  shell: |
+    istioctl install -y -f /tmp/istio-config.yaml
+  register: istio_install
+  changed_when: "'Pruning' in istio_install.stdout or 'Installing' in istio_install.stdout"
+
+- name: "Audit: Verify Istio CNI Chaining"
+  shell: |
+    # Check if a conflist exists and if 'istio-cni' is mentioned inside it
+    grep -r "istio-cni" /etc/cni/net.d/
+  register: cni_chain_check
+  changed_when: false
+  failed_when: cni_chain_check.rc != 0
+  retries: 10
+  delay: 5
+  until: cni_chain_check.rc == 0
+
+- name: "Istio: Wait for Ztunnel"
+  kubernetes.core.k8s_info:
+    kind: DaemonSet
+    namespace: istio-system
+    name: ztunnel
+  register: ztunnel_ds
+  until: >
+    ztunnel_ds.resources | length > 0 and
+    ztunnel_ds.resources[0].status.numberReady == ztunnel_ds.resources[0].status.desiredNumberScheduled
+  retries: 20
+  delay: 5
+
+# ==============================================================================
+# 5. ACTIVATE AMBIENT MODE
+# ==============================================================================
+- name: "Istio: Enable Ambient Mode for Default Namespace"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: default
+    merge_type: merge
+    definition:
+      metadata:
+        labels:
+          istio.io/dataplane-mode: ambient
+
+# ==============================================================================
+# 6. GATEWAY RESOURCE (Depends on MetalLB)
+# ==============================================================================
+- name: "SSL: Generate Self-Signed Keys"
+  shell: |
+    openssl req -x509 -sha256 -nodes -days 365 -newkey rsa:2048 \
+      -subj '/O=My Company/CN=*.test.local' \
+      -keyout /tmp/tls.key \
+      -out /tmp/tls.crt
+  args:
+    creates: /tmp/tls.key
+
+- name: "SSL: Read Remote Certificate"
+  ansible.builtin.slurp:
+    src: /tmp/tls.crt
+  register: remote_tls_crt
+
+- name: "SSL: Read Remote Key"
+  ansible.builtin.slurp:
+    src: /tmp/tls.key
+  register: remote_tls_key
+
+- name: "SSL: Create Kubernetes Secret"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: default-cert
+        namespace: istio-system
+      type: kubernetes.io/tls
+      data:
+        tls.crt: "{{ remote_tls_crt['content'] }}"
+        tls.key: "{{ remote_tls_key['content'] }}"
+
+- name: "Gateway: Apply Resource"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'gateway.yaml.j2') }}"
+
+# Checking pods is not enough. We must ensure MetalLB gave it an IP.
+- name: "Gateway: Wait for IP Assignment"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: istio-system
+    name: main-gateway
+  register: gateway_info
+  until: >
+    gateway_info.resources | length > 0 and
+    (gateway_info.resources[0].status.addresses | default([]) | length > 0)
+  retries: 30
+  delay: 10
+  failed_when: gateway_info.resources | length == 0
+
+# ==============================================================================
+# 7. METRICS SERVER
+# ==============================================================================
+- name: "Metrics: Install High-Availability Metrics Server"
+  kubernetes.core.k8s:
+    state: present
+    src: "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+
+- name: "Metrics: Patch for Insecure Kubelet"
+  kubernetes.core.k8s_json_patch:
+    kind: Deployment
+    namespace: kube-system
+    name: metrics-server
+    patch:
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--kubelet-insecure-tls"

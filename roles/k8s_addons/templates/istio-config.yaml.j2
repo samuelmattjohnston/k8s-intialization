@@ -1,0 +1,28 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+  name: istio-control-plane
+spec:
+  profile: ambient
+  values:
+    cni:
+      # This tells Istio CNI to append to the existing list (Cilium's)
+      # rather than overwriting the CNI spec.
+      chained: true
+      cniBinDir: /opt/cni/bin
+      cniConfDir: /etc/cni/net.d
+  components:
+    pilot:
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: false
+    egressGateways:
+    - name: istio-egressgateway
+      enabled: false

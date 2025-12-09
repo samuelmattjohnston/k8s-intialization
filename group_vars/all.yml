@@ -1,0 +1,73 @@
+# Cluster Settings
+cluster_vip: "192.168.255.50"
+pod_network: "10.244.0.0/16"
+debian_release: "trixie"
+# --- NETWORK CONFIGURATION ---
+networks:
+  # Standard /24 Network
+  admin:
+    prefix: "192.168.255"
+    cidr: "24"
+    gateway_octet: "254"
+  public:
+    prefix: "192.168.130"    # You still define the first 3 octets
+    cidr: "24"            # But the mask is now configurable
+    gateway_octet: "254"
+  private:
+    prefix: "192.168.110"
+    cidr: "24"
+  internal:
+    prefix: "192.168.100"
+    cidr: "24"          # Can be /24, /16, etc.
+    mtu: "9000"         # OPTIONAL: Jumbo frames are great for storage networks
+# MetalLB LoadBalancer Range
+# This will simply append to the public.prefix
+metallb:
+  range_start: "50"
+  range_end: "60"
+
+# Network IDs (Trunk Mode)
+vlan_ids:
+  public: 130
+  private: 110
+  internal: 100
+
+# Addon Versions
+versions:
+  kubernetes: "1.34"
+  kubernetes_full: "1.34.2"
+  kube_vip: "v0.9.1"
+  pause: "3.10"
+  cilium: "1.18.4"
+  cilium_cli: "v0.18.9"
+  istio: "1.28.1"
+  metallb: "v0.15.3"
+  gateway_api_crd: "v1.4.0"
+  nerdctl: "1.7.7"
+
+# Default Behavior
+k8s_schedulable: true
+
+cilium_config:
+  bpf_masquerade: true
+  loadbalancer_alg: "maglev"
+
+system_config:
+  enable_swap: false
+  install_nerdctl: true
+  system_timezone: "America/Chicago"
+
+# Security
+etcd_encryption_enabled: true
+
+grub_base_args:
+  - "quiet"
+  - "splash"
+  - "xen_nopvspin=1"
+
+# Tuning parameters for Strix Halo / AI workloads
+ai_tuning_args:
+  - "amd_iommu=off"
+  - "ttm.pages_limit=28835840"
+  - "ttm.page_pool_size=28835840"
+  - "amdgpu.gttsize=112640"

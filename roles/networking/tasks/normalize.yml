@@ -1,0 +1,51 @@
+# ----------------------------------------------------------------------
+# LOGIC: IP ADDRESS CALCULATION
+# ----------------------------------------------------------------------
+- name: "Normalize: Construct IP Addresses and Masks"
+  set_fact:
+    # 1. Construct the IP (Prefix + Node ID)
+    admin_ip: "{{ networks.admin.prefix }}.{{ node_id }}"
+    public_ip: "{{ networks.public.prefix }}.{{ node_id }}"
+    private_ip: "{{ networks.private.prefix }}.{{ node_id }}"
+    internal_ip: "{{ networks.internal.prefix }}.{{ node_id }}"
+
+    # 2. Extract the CIDR Masks
+    admin_cidr: "{{ networks.admin.cidr }}"
+    public_cidr: "{{ networks.public.cidr }}"
+    private_cidr: "{{ networks.private.cidr }}"
+    internal_cidr: "{{ networks.internal.cidr }}"
+
+    # 3. Construct Gateways (Prefix + Configured Octet)
+    gateway_admin: "{{ networks.admin.prefix }}.{{ networks.admin.gateway_octet | default('254') }}"
+    gateway_public: "{{ networks.public.prefix }}.{{ networks.public.gateway_octet | default('254') }}"
+
+# ----------------------------------------------------------------------
+# LOGIC: INTERFACE MAPPING (Standard vs Trunk)
+# ----------------------------------------------------------------------
+- name: "Normalize: Map Standard Interfaces"
+  set_fact:
+    net_admin_dev: "enX0"
+    net_public_dev: "enX1"
+    net_private_dev: "enX2"
+    net_internal_dev: "enX3"
+    create_vlans: false
+  when: mode == 'standard'
+
+- name: "Normalize: Map Trunk Interfaces"
+  set_fact:
+    net_admin_dev: "{{ trunk_parent }}"
+    net_public_dev: "vlan.{{ vlan_ids.public }}"
+    net_private_dev: "vlan.{{ vlan_ids.private }}"
+    net_internal_dev: "vlan.{{ vlan_ids.internal }}"
+    create_vlans: true
+  when: mode == 'trunk'
+
+# ----------------------------------------------------------------------
+# VERIFY
+# ----------------------------------------------------------------------
+- name: "Normalize: Print Resolution"
+  debug:
+    msg:
+      - "Node: {{ inventory_hostname }} (ID: {{ node_id }})"
+      - "Public: {{ public_ip }}/{{ public_cidr }} (GW: {{ gateway_public }})"
+      - "Private: {{ private_ip }}/{{ private_cidr }}"

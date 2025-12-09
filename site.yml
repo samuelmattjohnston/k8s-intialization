@@ -1,0 +1,178 @@
+# ----------------------------------------------------------------------
+# PHASE 1: PREPARE ALL NODES
+# ----------------------------------------------------------------------
+- hosts: k8s_cluster
+  become: yes
+  roles:
+    - networking
+    - k8s_prep
+
+# ----------------------------------------------------------------------
+# PHASE 2: BOOTSTRAP LEADER (First Node)
+# ----------------------------------------------------------------------
+- hosts: masters[0]
+  become: yes
+  tasks:
+    - name: Check if Cluster is initialized
+      stat: path=/etc/kubernetes/admin.conf
+      register: cluster_admin_conf
+
+    - name: "Upload Kubeadm Config"
+      template:
+        src: roles/k8s_prep/templates/kubeadm-config.yaml.j2
+        dest: /etc/kubernetes/kubeadm-config.yaml
+      when: not cluster_admin_conf.stat.exists
+
+    # 1. DEPLOY BOOTSTRAP KUBE-VIP
+    # Uses super-admin.conf + No Leader Election (Broadcast Mode)
+    - name: "Bootstrap: Deploy Kube-VIP (Bootstrap Mode)"
+      template:
+        src: roles/k8s_prep/templates/kube-vip-bootstrap.yaml.j2
+        dest: /etc/kubernetes/manifests/kube-vip.yaml
+      when: not cluster_admin_conf.stat.exists
+
+    # 2. INITIALIZE CLUSTER
+    - name: Initialize Cluster (Skip Kube-Proxy)
+      command: >
+        kubeadm init --config /etc/kubernetes/kubeadm-config.yaml --upload-certs --skip-phases=addon/kube-proxy
+      args:
+        creates: /etc/kubernetes/admin.conf
+      when: not cluster_admin_conf.stat.exists
+      register: kubeadm_init_result
+
+    # 3. SWAP KUBE-VIP TO HA MODE
+    # Switch to the standard HA configuration
+    # (Leader Election = True, using admin.conf).
+    - name: "HA: Upgrade Kube-VIP to Leader Election Mode"
+      template:
+        src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
+        dest: /etc/kubernetes/manifests/kube-vip.yaml
+
+    - name: Setup Kubeconfig
+      shell: |
+        mkdir -p /home/{{ ansible_user }}/.kube
+        cp /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
+        chown -R {{ ansible_user }}:{{ ansible_user }} /home/{{ ansible_user }}/.kube
+
+    - name: "Bootstrap: Wait for API Server VIP ({{ cluster_vip }}) to be reachable"
+      wait_for:
+        host: "{{ cluster_vip }}"
+        port: 6443
+        timeout: 180
+        delay: 5
+      delegate_to: localhost
+      become: no
+
+    - name: Generate Join Token
+      command: kubeadm token create --print-join-command
+      register: join_command_raw
+
+    - name: Get Certificate Key
+      shell: kubeadm init phase upload-certs --upload-certs | tail -1
+      register: cert_key_raw
+
+    - name: Register Dummy Host for Variables
+      add_host:
+        name: "K8S_TOKEN_HOLDER"
+        join_base: "{{ join_command_raw.stdout | trim }}"
+        cert_key: "{{ cert_key_raw.stdout | trim }}"
+    - name: "CNI: Deploy Cilium Network Fabric"
+      include_role:
+        name: k8s_addons
+        tasks_from: cni_only
+# ----------------------------------------------------------------------
+# PHASE 3: JOIN THE CLUSTER
+# ----------------------------------------------------------------------
+- hosts: masters[1:]
+  become: yes
+  serial: 1
+  vars:
+    join_base: "{{ hostvars['K8S_TOKEN_HOLDER']['join_base'] }}"
+    cert_key: "{{ hostvars['K8S_TOKEN_HOLDER']['cert_key'] }}"
+  tasks:
+    - name: Check if joined
+      stat: path=/etc/kubernetes/kubelet.conf
+      register: joined
+
+    # 1. DEPLOY BOOTSTRAP KUBE-VIP
+    # Secondary masters also start in bootstrap mode to ensure they can join
+    # without fighting for the IP immediately.
+    - name: "Bootstrap: Deploy Kube-VIP (Bootstrap Mode)"
+      template:
+        src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
+        dest: /etc/kubernetes/manifests/kube-vip.yaml
+      when: not joined.stat.exists
+
+    # 2. JOIN CLUSTER
+    - name: Join Cluster
+      command: >
+        {{ join_base }}
+        --control-plane
+        --certificate-key {{ cert_key }}
+        --apiserver-advertise-address {{ admin_ip }}
+      when: not joined.stat.exists
+      register: join_result
+
+    # 3. SWAP KUBE-VIP TO HA MODE
+    # Once joined, admin.conf exists. Switch to HA mode.
+    - name: "HA: Upgrade Kube-VIP to Standard Mode"
+      template:
+        src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
+        dest: /etc/kubernetes/manifests/kube-vip.yaml
+
+    - name: "Stability: Pause for Etcd Sync"
+      pause:
+        seconds: 10
+      when: join_result.changed
+
+- hosts: workers
+  become: yes
+  serial: 2
+  tasks:
+    - name: Check if Node is already joined
+      stat: path=/etc/kubernetes/kubelet.conf
+      register: worker_joined
+
+    - name: Fetch Join Command from Master
+      command: kubeadm token create --print-join-command
+      register: join_command_fetched
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      when: not worker_joined.stat.exists
+
+    - name: Join Cluster
+      command: >
+        {{ join_command_fetched.stdout | trim }}
+        --apiserver-advertise-address {{ admin_ip }}
+      when: not worker_joined.stat.exists
+
+# ----------------------------------------------------------------------
+# PHASE 4: NETWORK & ADDONS
+# ----------------------------------------------------------------------
+- hosts: masters[0]
+  become: yes
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+  pre_tasks:
+    # 1. Enforce Cluster Size
+    - name: "Cluster: Wait for all nodes to be registered"
+      shell: "kubectl get nodes --no-headers | wc -l"
+      register: node_count
+      until: node_count.stdout | int == groups['k8s_cluster'] | length
+      retries: 60
+      delay: 10
+      changed_when: false
+    - name: "Taint: Ensure Masters are Schedulable"
+      kubernetes.core.k8s_taint:
+        state: absent
+        name: "{{ item }}"
+        taints:
+          - key: "node-role.kubernetes.io/control-plane"
+            effect: "NoSchedule"
+      loop: "{{ groups['masters'] }}"
+      when: hostvars[item].k8s_schedulable | default(true) | bool
+
+  roles:
+    - k8s_addons
+

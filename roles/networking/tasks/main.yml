@@ -1,0 +1,223 @@
+---
+# ==============================================================================
+# 1. TIME & DNS PRE-REQUISITES
+# ==============================================================================
+- name: "Ensure systemd-timesyncd is installed and running"
+  ansible.builtin.apt:
+    name: systemd-timesyncd
+    state: present
+
+- name: "Wait for System Clock Synchronization"
+  ansible.builtin.command: timedatectl status
+  register: timesync_status
+  until: 'timesync_status.stdout.find("NTP service: active") != -1 or timesync_status.stdout.find("System clock synchronized: yes") != -1'
+  retries: 5
+  delay: 5
+  changed_when: false
+
+- name: "Install systemd-resolved"
+  apt:
+    name: systemd-resolved
+    state: present
+    update_cache: yes
+
+- name: "Ensure /etc/resolv.conf points to systemd-resolved stub resolver"
+  ansible.builtin.file:
+    src: /run/systemd/resolve/stub-resolv.conf
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    state: link
+    force: yes
+
+- name: "Restart systemd-resolved"
+  ansible.builtin.service:
+    name: systemd-resolved
+    state: restarted
+
+# ==============================================================================
+# 2. STANDARDIZE NETWORKING
+# ==============================================================================
+- name: "Net: Remove Legacy Network Managers"
+  apt:
+    name: [ifupdown, netplan.io, isc-dhcp-client, dhcpcd5, dhcpcd-base]
+    state: absent
+    purge: yes
+
+- name: "Net: Disable Legacy Networking Service"
+  systemd:
+    name: networking
+    state: stopped
+    enabled: no
+  ignore_errors: yes
+
+- name: "Net: Kill lingering dhcpcd processes"
+  shell: "killall dhcpcd || true"
+  changed_when: false
+
+- name: "Net: Flush Legacy Interface Configs"
+  file:
+    path: /etc/network/interfaces
+    state: absent
+
+- name: "Net: Remove old netplan/networkd runtime files"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/netplan
+    - /run/systemd/network
+
+# ==============================================================================
+# 3. CONFIGURE SYSTEMD-NETWORKD
+# ==============================================================================
+- name: "Net: Enable systemd-networkd"
+  ansible.builtin.service:
+    name: systemd-networkd
+    enabled: yes
+    state: started
+
+# Run Logic Engine to calculate IPs and Interface Names
+- include_tasks: normalize.yml
+
+# Check if IP transition is needed before we write files
+- name: "Net: Check if Connection Swap is Required"
+  set_fact:
+    needs_ip_transition: "{{ ansible_host != admin_ip }}"
+
+# --- VLAN DEFINITIONS (Trunk Only) ---
+- name: "NetDev: Create VLAN Definitions"
+  copy:
+    dest: "/etc/systemd/network/10-{{ item.dev }}.netdev"
+    content: |
+      [NetDev]
+      Name={{ item.dev }}
+      Kind=vlan
+      [VLAN]
+      Id={{ item.id }}
+  loop:
+    - { dev: "{{ net_public_dev }}", id: "{{ vlan_ids.public }}" }
+    - { dev: "{{ net_private_dev }}", id: "{{ vlan_ids.private }}" }
+    - { dev: "{{ net_internal_dev }}", id: "{{ vlan_ids.internal }}" }
+  when: create_vlans | bool
+  notify: Reload Networkd
+
+# --- ADMIN NETWORK ---
+- name: "Network: Admin Config"
+  copy:
+    dest: /etc/systemd/network/20-admin.network
+    content: |
+      [Match]
+      Name={{ net_admin_dev }}
+      [Network]
+      Address={{ admin_ip }}/{{ admin_cidr }}
+      Gateway={{ gateway_admin }}
+      DNS=1.1.1.1
+      # Explicitly Disable DHCP to prevent conflict
+      DHCP=no
+      {% if create_vlans %}
+      VLAN={{ net_public_dev }}
+      VLAN={{ net_private_dev }}
+      VLAN={{ net_internal_dev }}
+      {% endif %}
+  notify: Reload Networkd
+
+# --- PUBLIC NETWORK ---
+- name: "Network: Public Config"
+  copy:
+    dest: /etc/systemd/network/20-public.network
+    content: |
+      [Match]
+      Name={{ net_public_dev }}
+      [Network]
+      Address={{ public_ip }}/{{ public_cidr }}
+      IPForward=yes
+      IPMasquerade=no
+      IPv4AcceptLocal=yes
+      ConfigureWithoutCarrier=yes
+      [RoutingPolicyRule]
+      From={{ public_ip }}/32
+      Table=200
+      Priority=200
+      [Route]
+      Destination=0.0.0.0/0
+      Gateway={{ gateway_public }}
+      Table=200
+  notify: Reload Networkd
+
+- name: "Net: Persist rp_filter for Public Interface"
+  copy:
+    dest: "/etc/sysctl.d/90-public-rp-filter.conf"
+    content: |
+      net.ipv4.conf.{{ net_public_dev }}.rp_filter = 2
+  notify: Reload Networkd
+
+# --- PRIVATE NETWORK ---
+- name: "Network: Private Config"
+  copy:
+    dest: /etc/systemd/network/20-private.network
+    content: |
+      [Match]
+      Name={{ net_private_dev }}
+      [Network]
+      Address={{ private_ip }}/{{ private_cidr }}
+  notify: Reload Networkd
+
+# --- INTERNAL NETWORK ---
+- name: "Network: Internal Config"
+  copy:
+    dest: /etc/systemd/network/20-internal.network
+    content: |
+      [Match]
+      Name={{ net_internal_dev }}
+      [Network]
+      Address={{ internal_ip }}/{{ internal_cidr }}
+      MTUBytes={{ networks.internal.mtu | default('1500') }}
+  notify: Reload Networkd
+
+# ==============================================================================
+# 4. APPLY & VALIDATE (ROBUST FLUSH METHOD)
+# ==============================================================================
+
+- name: "Net: Apply Config with Hard Reset (Async)"
+  block:
+    - name: "Net: Flush IPs and Restart Networkd (Fire and Forget)"
+      # 1. sleep 2: Give Ansible time to disconnect cleanly
+      # 2. ip addr flush: Wipes the IPs (and broken routes) completely.
+      # 3. systemctl restart: Forces networkd to rebuild the stack from scratch.
+      shell: |
+        nohup sh -c 'sleep 2 && ip addr flush dev {{ net_admin_dev }} scope global && systemctl restart systemd-networkd' &
+      async: 10
+      poll: 0
+
+    - name: "Net: Update Ansible Inventory Hostname"
+      set_fact:
+        ansible_host: "{{ admin_ip }}"
+
+    - name: "Net: Wait for Network to Initialize"
+      wait_for_connection:
+        delay: 5        # Wait for the flush/restart to happen
+        timeout: 90     # Give it plenty of time to negotiate link
+        connect_timeout: 10
+
+  # Trigger if IP changed OR if we are in Trunk Mode (to regenerate routes)
+  when: needs_ip_transition | bool or mode == 'trunk'
+
+# Case B: IP is Static and Standard Mode - Just Flush Handlers
+- name: "Net: Flush Handlers"
+  meta: flush_handlers
+  when: not needs_ip_transition | bool and mode != 'trunk'
+
+# Final Validation (Ensures Trunk Mode actually created the VLANs)
+- name: "Net: Validate VLAN Interfaces Exist (Trunk Mode)"
+  shell: "ip link show {{ net_private_dev }}"
+  register: vlan_check
+  retries: 5
+  delay: 2
+  until: vlan_check.rc == 0
+  when: create_vlans | bool
+
+- name: "Net: Ensure Legacy IPs are Gone"
+  shell: "ip addr flush dev {{ net_admin_dev }} scope global dynamic"
+  ignore_errors: yes
+  changed_when: false

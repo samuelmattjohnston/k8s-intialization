@@ -1,0 +1,18 @@
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: public-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  # Dynamically constructs: 192.168.130.51-192.168.130.60
+  - {{ networks.public.prefix }}.{{ metallb.range_start }}-{{ networks.public.prefix }}.{{ metallb.range_end }}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: public-binding
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - public-pool

@@ -1,0 +1,254 @@
+- include_role:
+    name: networking
+    tasks_from: normalize
+  when: net_admin_dev is undefined
+
+# --- UPGRADE KERNEL & GRUB ---
+- name: "System: Kernel Upgrade & Tuning"
+  include_tasks: upgrade_kernel.yml
+
+# --- OS CONFIGURATION ---
+- name: "OS: Load Kernel Modules"
+  copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+
+- name: "OS: Activate Modules"
+  shell: modprobe overlay && modprobe br_netfilter
+  changed_when: false
+
+- name: "OS: Enable IP Forwarding (Required)"
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    state: present
+    reload: yes
+
+- name: "OS: Enable Non-Local Bind"
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: '1'
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    state: present
+    reload: yes
+
+- name: "OS: Enable Bridge Netfilter (IPv4)"
+  ansible.posix.sysctl:
+    name: net.bridge.bridge-nf-call-iptables
+    value: '1'
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    state: present
+    reload: yes
+
+- name: "OS: Enable Bridge Netfilter (IPv6)"
+  ansible.posix.sysctl:
+    name: net.bridge.bridge-nf-call-ip6tables
+    value: '1'
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    state: present
+    reload: yes
+
+- name: "OS: Increase User Watches (Istio Requirement)"
+  ansible.posix.sysctl:
+    name: fs.inotify.max_user_watches
+    value: '524288'
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    state: present
+    reload: yes
+
+- name: "OS: Increase User Instances (Istio Requirement)"
+  ansible.posix.sysctl:
+    name: fs.inotify.max_user_instances
+    value: '8192'
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    state: present
+    reload: yes
+
+# --- SWAP LOGIC ---
+- name: "OS: Disable Swap"
+  shell: |
+    swapoff -a
+    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+  when: not system_config.enable_swap | bool
+
+- name: "Swap: Create 1G Swapfile"
+  shell: |
+    dd if=/dev/zero of=/swapfile bs=1M count=1024
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+  args:
+    creates: /swapfile
+  when: system_config.enable_swap | bool
+
+- name: "Swap: Persist in fstab"
+  mount:
+    path: none
+    src: /swapfile
+    fstype: swap
+    opts: sw
+    state: present
+  when: system_config.enable_swap | bool
+
+- name: "Swap: Tune Swappiness"
+  sysctl:
+    name: vm.swappiness
+    value: '1'
+    state: present
+    reload: yes
+  when: system_config.enable_swap | bool
+
+- name: "OS: Update /etc/hosts"
+  blockinfile:
+    path: /etc/hosts
+    block: |
+      127.0.0.1 localhost
+      127.0.1.1 {{ inventory_hostname }}
+      {% for host in groups['masters'] %}
+      {{ hostvars[host].admin_ip }} {{ host }}
+      {% endfor %}
+
+- name: "OS: Install Dependencies"
+  apt:
+    name: [apt-transport-https, ca-certificates, curl, gpg, socat, conntrack, systemd-timesyncd, python3-kubernetes]
+    state: present
+    update_cache: yes
+
+- name: "Time: Ensure systemd-timesyncd is active and enabled"
+  ansible.builtin.service:
+    name: systemd-timesyncd
+    state: started
+    enabled: yes
+
+- name: "Time: Enforce NTP Sync"
+  ansible.builtin.shell: timedatectl set-ntp true
+
+# --- TIMEZONE CONFIGURATION ---
+- name: "Time: Set system timezone"
+  community.general.timezone:
+    name: "{{ system_config.system_timezone }}"
+
+# --- CONTAINERD ---
+- name: "Containerd: Add Docker Repo"
+  shell: |
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list
+  args:
+    creates: /etc/apt/sources.list.d/docker.list
+
+- name: "Containerd: Install"
+  apt:
+    name: containerd.io
+    state: present
+    update_cache: yes
+
+- name: "Containerd: Configure"
+  shell: |
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+    sed -i 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:{{ versions.pause }}"|g' /etc/containerd/config.toml
+    sed -i 's/discard_unpacked_layers = false/discard_unpacked_layers = true/g' /etc/containerd/config.toml
+
+- name: "Containerd: Force Restart to Load Config"
+  ansible.builtin.service:
+    name: containerd
+    state: restarted
+    enabled: yes
+
+# --- KUBERNETES TOOLS ---
+- name: "K8s: Add Repo"
+  shell: |
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ versions.kubernetes }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ versions.kubernetes }}/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+  args:
+    creates: /etc/apt/sources.list.d/kubernetes.list
+
+- name: "K8s: Install Tools"
+  apt:
+    name: [kubelet, kubeadm, kubectl]
+    state: present
+    update_cache: yes
+
+- name: "K8s: Hold Packages"
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: [kubelet, kubeadm, kubectl]
+
+# --- KUBE-VIP (HA) ---
+- name: "HA: Create Manifest Directory"
+  file: path=/etc/kubernetes/manifests state=directory
+  when: inventory_hostname in groups['masters']
+
+- name: "HA: Pre-pull Images"
+  command: crictl pull ghcr.io/kube-vip/kube-vip:{{ versions.kube_vip }}
+  register: vip_pull
+  retries: 5
+  delay: 10
+  until: vip_pull.rc == 0
+  when: inventory_hostname in groups['masters']
+
+- name: "K8s: Pre-pull Control Plane Images"
+  command: kubeadm config images pull --kubernetes-version v{{ versions.kubernetes_full }}
+  register: k8s_pull
+  retries: 5
+  delay: 10
+  until: k8s_pull.rc == 0
+  when: inventory_hostname in groups['masters']
+
+# --- SECURITY LOGIC ---
+- name: "Security: Generate Random Key"
+  command: "openssl rand -base64 32"
+  register: key_gen_raw
+  run_once: true
+  changed_when: false
+  when: etcd_encryption_enabled | bool
+
+- name: "Security: Set Encryption Fact (All Hosts)"
+  set_fact:
+    # Grab the variable from the first host in the batch where run_once executed
+    encryption_key: "{{ hostvars[ansible_play_hosts[0]]['key_gen_raw'].stdout }}"
+  when: etcd_encryption_enabled | bool
+
+- name: "Security: Create Encryption Config"
+  template:
+    src: encryption-config.yaml.j2
+    dest: /etc/kubernetes/encryption-config.yaml
+    mode: '0600'
+  when: etcd_encryption_enabled | bool
+
+# --- NERDCTL LOGIC (Versioned) ---
+- name: "Tools: Download Nerdctl Full Tarball"
+  get_url:
+    url: "https://github.com/containerd/nerdctl/releases/download/v{{ versions.nerdctl }}/nerdctl-full-{{ versions.nerdctl }}-linux-amd64.tar.gz"
+    dest: /tmp/nerdctl.tar.gz
+    mode: '0644'
+  when: system_config.install_nerdctl | bool
+
+- name: "Tools: Install Nerdctl Binary Only"
+  unarchive:
+    src: /tmp/nerdctl.tar.gz
+    dest: /usr/local/bin
+    include: ['bin/nerdctl']
+    extra_opts: ['--strip-components=1']
+    remote_src: yes
+    mode: '0755'
+  when: system_config.install_nerdctl | bool
+
+# --- SHELL USABILITY ---
+- name: "Shell: Install Bash Completion Package"
+  ansible.builtin.apt:
+    name: bash-completion
+    state: present
+
+- name: "Shell: Enable Kubectl Autocomplete System-Wide"
+  ansible.builtin.shell: "kubectl completion bash > /etc/bash_completion.d/kubectl"
+  args:
+    creates: /etc/bash_completion.d/kubectl
+  when: inventory_hostname in groups['masters']

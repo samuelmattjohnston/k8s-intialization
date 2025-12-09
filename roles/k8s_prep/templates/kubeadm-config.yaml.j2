@@ -1,0 +1,56 @@
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "{{ admin_ip }}"
+  bindPort: 6443
+nodeRegistration:
+  criSocket: "unix:///var/run/containerd/containerd.sock"
+  kubeletExtraArgs:
+  - name: "node-ip"
+    value: "{{ admin_ip }}"
+#init
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: "v{{ versions.kubernetes_full }}"
+controlPlaneEndpoint: "{{ cluster_vip }}:6443"
+networking:
+  podSubnet: "{{ pod_network }}"
+apiServer:
+  extraArgs:
+{% if etcd_encryption_enabled | bool %}
+  - name: "encryption-provider-config"
+    value: "/etc/kubernetes/encryption-config.yaml"
+{% endif %}
+  extraVolumes:
+{% if etcd_encryption_enabled | bool %}
+  - name: encryption-config
+    hostPath: /etc/kubernetes/encryption-config.yaml
+    mountPath: /etc/kubernetes/encryption-config.yaml
+    readOnly: true
+{% endif %}
+controllerManager: {}
+scheduler: {}
+#cluster
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+clientConnection:
+  kubeconfig: "/etc/kubernetes/kubelet.conf"
+  server: "https://{{ cluster_vip }}:6443"
+# ------------------------------------------------------------------
+{% if system_config.enable_swap | bool %}
+failSwapOn: false
+memorySwap:
+  swapBehavior: LimitedSwap
+{% else %}
+failSwapOn: true
+{% endif %}
+imageGCHighThresholdPercent: 75
+imageGCLowThresholdPercent: 60
+containerLogMaxSize: "10Mi"
+containerLogMaxFiles: 5
+#kubelet
+
+
