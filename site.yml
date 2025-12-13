@@ -4,8 +4,10 @@
 - hosts: k8s_cluster
   become: yes
   roles:
-    - networking
-    - k8s_prep
+    - role: networking
+      tags: networking
+    - role: k8s_prep
+      tags: k8s_prep
 
 # ----------------------------------------------------------------------
 # PHASE 2: BOOTSTRAP LEADER (First Node)
@@ -13,6 +15,10 @@
 - hosts: masters[0]
   become: yes
   tasks:
+    - include_role:
+        name: networking
+        tasks_from: normalize
+
     - name: Check if Cluster is initialized
       stat: path=/etc/kubernetes/admin.conf
       register: cluster_admin_conf
@@ -23,15 +29,14 @@
         dest: /etc/kubernetes/kubeadm-config.yaml
       when: not cluster_admin_conf.stat.exists
 
-    # 1. DEPLOY BOOTSTRAP KUBE-VIP
-    # Uses super-admin.conf + No Leader Election (Broadcast Mode)
+    # 1. BOOTSTRAP: Bring up Private VIP only (No leader election)
     - name: "Bootstrap: Deploy Kube-VIP (Bootstrap Mode)"
       template:
         src: roles/k8s_prep/templates/kube-vip-bootstrap.yaml.j2
         dest: /etc/kubernetes/manifests/kube-vip.yaml
       when: not cluster_admin_conf.stat.exists
 
-    # 2. INITIALIZE CLUSTER
+    # 2. INIT: Cluster initializes using Private VIP
     - name: Initialize Cluster (Skip Kube-Proxy)
       command: >
         kubeadm init --config /etc/kubernetes/kubeadm-config.yaml --upload-certs --skip-phases=addon/kube-proxy
@@ -40,13 +45,21 @@
       when: not cluster_admin_conf.stat.exists
       register: kubeadm_init_result
 
-    # 3. SWAP KUBE-VIP TO HA MODE
-    # Switch to the standard HA configuration
-    # (Leader Election = True, using admin.conf).
-    - name: "HA: Upgrade Kube-VIP to Leader Election Mode"
+    # 3. HA: Deploy BOTH Private and Admin VIPs
+    # The cluster keeps using Private. You start using Admin.
+    - name: "HA: Deploy Dual Kube-VIP (Admin + Internal)"
       template:
         src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
-        dest: /etc/kubernetes/manifests/kube-vip.yaml
+        dest: "/etc/kubernetes/manifests/kube-vip-{{ item.name }}.yaml"
+      loop:
+        - { name: "admin",    vip: "{{ cluster_vip }}",          interface: "{{ net_admin_dev }}",   metrics_port: "2112" }
+        - { name: "internal", vip: "{{ cluster_private_vip }}",  interface: "{{ net_private_dev }}", metrics_port: "2113" }
+
+    # 4. CLEANUP: Remove the bootstrap pod
+    - name: "HA: Remove Bootstrap Kube-VIP Manifest"
+      file:
+        path: /etc/kubernetes/manifests/kube-vip.yaml
+        state: absent
 
     - name: Setup Kubeconfig
       shell: |
@@ -54,7 +67,8 @@
         cp /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
         chown -R {{ ansible_user }}:{{ ansible_user }} /home/{{ ansible_user }}/.kube
 
-    - name: "Bootstrap: Wait for API Server VIP ({{ cluster_vip }}) to be reachable"
+    # --- VERIFICATION ---
+    - name: "Bootstrap: Verify Admin Access (Laptop -> Admin VIP)"
       wait_for:
         host: "{{ cluster_vip }}"
         port: 6443
@@ -62,6 +76,13 @@
         delay: 5
       delegate_to: localhost
       become: no
+
+    - name: "Bootstrap: Verify Internal Access (Node -> Internal VIP)"
+      wait_for:
+        host: "{{ cluster_private_vip }}"
+        port: 6443
+        timeout: 60
+        delay: 2
 
     - name: Generate Join Token
       command: kubeadm token create --print-join-command
@@ -76,10 +97,12 @@
         name: "K8S_TOKEN_HOLDER"
         join_base: "{{ join_command_raw.stdout | trim }}"
         cert_key: "{{ cert_key_raw.stdout | trim }}"
+
     - name: "CNI: Deploy Cilium Network Fabric"
       include_role:
         name: k8s_addons
         tasks_from: cni_only
+
 # ----------------------------------------------------------------------
 # PHASE 3: JOIN THE CLUSTER
 # ----------------------------------------------------------------------
@@ -90,16 +113,18 @@
     join_base: "{{ hostvars['K8S_TOKEN_HOLDER']['join_base'] }}"
     cert_key: "{{ hostvars['K8S_TOKEN_HOLDER']['cert_key'] }}"
   tasks:
+    - include_role:
+        name: networking
+        tasks_from: normalize
+
     - name: Check if joined
       stat: path=/etc/kubernetes/kubelet.conf
       register: joined
 
-    # 1. DEPLOY BOOTSTRAP KUBE-VIP
-    # Secondary masters also start in bootstrap mode to ensure they can join
-    # without fighting for the IP immediately.
+    # 1. DEPLOY BOOTSTRAP KUBE-VIP (Private Only)
     - name: "Bootstrap: Deploy Kube-VIP (Bootstrap Mode)"
       template:
-        src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
+        src: roles/k8s_prep/templates/kube-vip-bootstrap.yaml.j2
         dest: /etc/kubernetes/manifests/kube-vip.yaml
       when: not joined.stat.exists
 
@@ -109,16 +134,24 @@
         {{ join_base }}
         --control-plane
         --certificate-key {{ cert_key }}
-        --apiserver-advertise-address {{ admin_ip }}
+        --apiserver-advertise-address {{ private_ip }}
       when: not joined.stat.exists
       register: join_result
 
-    # 3. SWAP KUBE-VIP TO HA MODE
-    # Once joined, admin.conf exists. Switch to HA mode.
-    - name: "HA: Upgrade Kube-VIP to Standard Mode"
+    # 3. HA: Deploy BOTH VIPs
+    - name: "HA: Deploy Dual Kube-VIP (Admin + Internal)"
       template:
         src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
-        dest: /etc/kubernetes/manifests/kube-vip.yaml
+        dest: "/etc/kubernetes/manifests/kube-vip-{{ item.name }}.yaml"
+      loop:
+        - { name: "admin",    vip: "{{ cluster_vip }}",          interface: "{{ net_admin_dev }}",   metrics_port: "2112" }
+        - { name: "internal", vip: "{{ cluster_private_vip }}",  interface: "{{ net_private_dev }}", metrics_port: "2113" }
+
+    # 4. CLEANUP
+    - name: "HA: Remove Bootstrap Kube-VIP Manifest"
+      file:
+        path: /etc/kubernetes/manifests/kube-vip.yaml
+        state: absent
 
     - name: "Stability: Pause for Etcd Sync"
       pause:
@@ -129,6 +162,10 @@
   become: yes
   serial: 2
   tasks:
+    - include_role:
+        name: networking
+        tasks_from: normalize
+
     - name: Check if Node is already joined
       stat: path=/etc/kubernetes/kubelet.conf
       register: worker_joined
@@ -143,7 +180,7 @@
     - name: Join Cluster
       command: >
         {{ join_command_fetched.stdout | trim }}
-        --apiserver-advertise-address {{ admin_ip }}
+        --apiserver-advertise-address {{ private_ip }}
       when: not worker_joined.stat.exists
 
 # ----------------------------------------------------------------------
@@ -155,7 +192,6 @@
     KUBECONFIG: /etc/kubernetes/admin.conf
 
   pre_tasks:
-    # 1. Enforce Cluster Size
     - name: "Cluster: Wait for all nodes to be registered"
       shell: "kubectl get nodes --no-headers | wc -l"
       register: node_count
@@ -163,6 +199,7 @@
       retries: 60
       delay: 10
       changed_when: false
+
     - name: "Taint: Ensure Masters are Schedulable"
       kubernetes.core.k8s_taint:
         state: absent
@@ -172,7 +209,18 @@
             effect: "NoSchedule"
       loop: "{{ groups['masters'] }}"
       when: hostvars[item].k8s_schedulable | default(true) | bool
-
+    - name: "Label: Allow Masters to host Load Balancers"
+      kubernetes.core.k8s:
+        state: patched
+        kind: Node
+        name: "{{ item }}"
+        definition:
+          metadata:
+            labels:
+              # Setting the value to null removes the label
+              node.kubernetes.io/exclude-from-external-load-balancers: null
+      loop: "{{ groups['masters'] }}"
+      when: hostvars[item].k8s_schedulable | default(true) | bool
   roles:
-    - k8s_addons
-
+    - role: k8s_addons
+      tags: k8s_addons

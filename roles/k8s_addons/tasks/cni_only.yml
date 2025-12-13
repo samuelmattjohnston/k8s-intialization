@@ -1,15 +1,27 @@
 # ==============================================================================
-# 0. SETUP & TOOLS
+# 0. SETUP & TOOLS (Idempotent Fix)
 # ==============================================================================
 - include_role:
     name: networking
     tasks_from: normalize
+
+- name: "Tools: Check installed Cilium CLI version"
+  shell: "cilium version --client 2>/dev/null | grep -oE 'v[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
+  register: cilium_installed_version
+  failed_when: false
+  changed_when: false
 
 - name: "Tools: Download Cilium CLI"
   get_url:
     url: "https://github.com/cilium/cilium-cli/releases/download/{{ versions.cilium_cli }}/cilium-linux-amd64.tar.gz"
     dest: /tmp/cilium-cli.tar.gz
     mode: '0644'
+  register: download_cilium
+  until: download_cilium is success
+  retries: 5
+  delay: 10
+  # Only download if the version doesn't match OR if the command failed (not installed)
+  when: cilium_installed_version.stdout != versions.cilium_cli
 
 - name: "Tools: Install Cilium CLI"
   unarchive:
@@ -17,7 +29,8 @@
     dest: /usr/local/bin
     remote_src: yes
     mode: '0755'
-
+  # Only install if we actually downloaded it
+  when: download_cilium is changed
 # ==============================================================================
 # 1. CILIUM (CNI Layer)
 # ==============================================================================
@@ -28,7 +41,7 @@
   changed_when: false
 
 # ----------------------------------------------------------------------
-# STEP 1: GLOBAL INSTALL (Empty)
+# STEP 1: GLOBAL INSTALL (Base Layer)
 # ----------------------------------------------------------------------
 - name: "Cilium: Install (Base Layer)"
   environment:
@@ -36,17 +49,22 @@
   shell: >-
     cilium install
     --version {{ versions.cilium }}
-    --set k8sServiceHost={{ cluster_vip }}
+    --set k8sServiceHost={{ cluster_private_vip }}
     --set k8sServicePort=6443
     --set kubeProxyReplacement=true
     --set cni.exclusive=false
+    --set socketLB.hostNamespaceOnly=true
     --set k8s.requireIPv4PodCIDR=false
     --set ipam.mode=cluster-pool
     --set ipam.operator.clusterPoolIPv4PodCIDRList="{{ pod_network }}"
     --set l2announcements.enabled=false
+    --set routingMode=native
+    --set autoDirectNodeRoutes=true
+    --set ipv4NativeRoutingCIDR="{{ pod_network }}"
     --set bpf.masquerade={{ cilium_config.bpf_masquerade | lower }}
     --set bpf.hostLegacyRouting=false
     --set nodeConfig.enabled=true
+    --set vlan.enabled=true
     --wait
   register: cilium_install_cmd
   failed_when:
@@ -90,14 +108,13 @@
           matchLabels:
             kubernetes.io/hostname: "{{ item }}"
         defaults:
-          # 1. Identity Anchor
-          direct-routing-device: "{{ hostvars[item].net_admin_dev }}"
+          # 1. Identity Anchor (Use the Private IP for identity in native mode)
+          direct-routing-device: "{{ hostvars[item].net_private_dev }}"
 
           # 2. Explicit Device String
-          # The API requires a comma-separated string, so we just plug the variables in directly.
-          devices: "{{ hostvars[item].net_admin_dev }},{{ hostvars[item].net_private_dev }},{{ hostvars[item].net_public_dev }}"
-
+          devices: "{{ hostvars[item].net_private_dev }},{{ hostvars[item].net_public_dev }}"
   loop: "{{ groups['k8s_cluster'] }}"
+
 # ==============================================================================
 # C. STABILIZATION
 # ==============================================================================

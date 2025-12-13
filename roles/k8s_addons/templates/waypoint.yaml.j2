@@ -1,0 +1,15 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: waypoint
+  namespace: default
+  labels:
+    # This label helps Istio identify this as a service-account or namespace waypoint
+    istio.io/waypoint-for: service-account
+spec:
+  # This class name triggers the Ambient Waypoint controller
+  gatewayClassName: istio-waypoint
+  listeners:
+  - name: mesh
+    port: 15008
+    protocol: HBONE

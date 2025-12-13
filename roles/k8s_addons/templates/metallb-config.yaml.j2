@@ -5,7 +5,6 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  # Dynamically constructs: 192.168.130.51-192.168.130.60
   - {{ networks.public.prefix }}.{{ metallb.range_start }}-{{ networks.public.prefix }}.{{ metallb.range_end }}
 ---
 apiVersion: metallb.io/v1beta1
@@ -16,3 +15,17 @@ metadata:
 spec:
   ipAddressPools:
   - public-pool
+
+  {% set iface_list = [] %}
+  {% for host in groups['k8s_cluster'] %}
+    {% if hostvars[host].mode == 'trunk' %}
+      {% set _ = iface_list.append("vlan." ~ vlan_ids.public) %}
+    {% else %}
+      {% set _ = iface_list.append("enX1") %}
+    {% endif %}
+  {% endfor %}
+
+  interfaces:
+  {% for iface in iface_list | unique %}
+  - "{{ iface }}"
+  {% endfor %}

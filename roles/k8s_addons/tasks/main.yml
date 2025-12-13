@@ -26,8 +26,7 @@
 
 
 # ==============================================================================
-# 2. METALLB (Layer 2) - MOVED UP
-# Must run BEFORE Gateway Resource creation so the LB Controller exists
+# 2. METALLB (Layer 2)
 # ==============================================================================
 - name: "MetalLB: Install"
   kubernetes.core.k8s:
@@ -95,7 +94,6 @@
 
 - name: "Audit: Verify Istio CNI Chaining"
   shell: |
-    # Check if a conflist exists and if 'istio-cni' is mentioned inside it
     grep -r "istio-cni" /etc/cni/net.d/
   register: cni_chain_check
   changed_when: false
@@ -170,7 +168,6 @@
     state: present
     definition: "{{ lookup('template', 'gateway.yaml.j2') }}"
 
-# Checking pods is not enough. We must ensure MetalLB gave it an IP.
 - name: "Gateway: Wait for IP Assignment"
   kubernetes.core.k8s_info:
     api_version: gateway.networking.k8s.io/v1
@@ -186,7 +183,68 @@
   failed_when: gateway_info.resources | length == 0
 
 # ==============================================================================
-# 7. METRICS SERVER
+# 7. CILIUM & AMBIENT POLICIES (Fixes & Security)
+# ==============================================================================
+- name: "Cilium: Apply Fixes and Isolation Policies"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'cilium-policies.yaml.j2') }}"
+
+# ==============================================================================
+# 8. ISTIO STABILITY PATCHES
+# ==============================================================================
+- name: "Istio: Patch CNI Node Agent to wait for Cilium"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: istio-cni-node
+        namespace: istio-system
+      spec:
+        template:
+          spec:
+            initContainers:
+            - name: wait-for-cilium-cni
+              image: busybox:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Checking for existing CNI config..."
+                  # Loop until we see a config file that ISN'T named *-istio*
+                  until ls /host/etc/cni/net.d/*.conf* 2>/dev/null | grep -v istio; do
+                    echo "Waiting for Cilium CNI config to appear..."
+                    sleep 2
+                  done
+                  echo "Cilium config found. Proceeding."
+              volumeMounts:
+              - name: cni-net-dir
+                mountPath: /host/etc/cni/net.d
+                readOnly: true
+# ==============================================================================
+# 9. ISTIO WAYPOINT PROXY (L7 VISIBILITY)
+# ==============================================================================
+- name: "Ambient: Deploy Waypoint Proxy"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'waypoint.yaml.j2') }}"
+
+- name: "Ambient: Enroll Namespace into Waypoint"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: default
+    merge_type: merge
+    definition:
+      metadata:
+        labels:
+          # This tells Istio: "Send L7 traffic for this NS to the 'waypoint' gateway"
+          istio.io/use-waypoint: waypoint
+
+# ==============================================================================
+# 10. METRICS SERVER
 # ==============================================================================
 - name: "Metrics: Install High-Availability Metrics Server"
   kubernetes.core.k8s:

@@ -108,7 +108,7 @@
       127.0.0.1 localhost
       127.0.1.1 {{ inventory_hostname }}
       {% for host in groups['masters'] %}
-      {{ hostvars[host].admin_ip }} {{ host }}
+      {{ hostvars[host].private_ip }} {{ host }}
       {% endfor %}
 
 - name: "OS: Install Dependencies"
@@ -223,13 +223,27 @@
     mode: '0600'
   when: etcd_encryption_enabled | bool
 
-# --- NERDCTL LOGIC (Versioned) ---
+# --- NERDCTL LOGIC (Versioned & Idempotent) ---
+- name: "Tools: Check installed Nerdctl version"
+  shell: "nerdctl --version 2>/dev/null | awk '{print $3}' | sed 's/^v//'"
+  register: nerdctl_installed_version
+  failed_when: false
+  changed_when: false
+  when: system_config.install_nerdctl | bool
+
 - name: "Tools: Download Nerdctl Full Tarball"
   get_url:
     url: "https://github.com/containerd/nerdctl/releases/download/v{{ versions.nerdctl }}/nerdctl-full-{{ versions.nerdctl }}-linux-amd64.tar.gz"
     dest: /tmp/nerdctl.tar.gz
     mode: '0644'
-  when: system_config.install_nerdctl | bool
+  register: download_nerdctl
+  until: download_nerdctl is success
+  retries: 5
+  delay: 10
+  # Run ONLY if installed version is different from target version
+  when:
+    - system_config.install_nerdctl | bool
+    - nerdctl_installed_version.stdout != versions.nerdctl
 
 - name: "Tools: Install Nerdctl Binary Only"
   unarchive:
@@ -239,7 +253,9 @@
     extra_opts: ['--strip-components=1']
     remote_src: yes
     mode: '0755'
-  when: system_config.install_nerdctl | bool
+  when:
+    - system_config.install_nerdctl | bool
+    - download_nerdctl is changed
 
 # --- SHELL USABILITY ---
 - name: "Shell: Install Bash Completion Package"

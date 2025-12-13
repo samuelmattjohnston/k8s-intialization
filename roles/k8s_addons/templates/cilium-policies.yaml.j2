@@ -1,0 +1,99 @@
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: allow-ambient-hostprobes
+  namespace: kube-system
+spec:
+  description: "Allows SNAT-ed kubelet health check probes into ambient pods"
+  enableDefaultDeny:
+    egress: false
+    ingress: false
+  endpointSelector: {}
+  ingress:
+  - fromCIDR:
+    - "169.254.7.127/32"
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: isolate-admin-network
+spec:
+  description: "Block Admin VLAN, but ALLOW K8s Internals"
+  endpointSelector:
+    matchLabels: {}
+  egress:
+  # 1. CRITICAL: Allow pods to talk to the Cluster Infrastructure
+  - toEntities:
+    - cluster
+    - host
+    - remote-node
+    - kube-apiserver
+    - init
+
+  # 2. CRITICAL: Allow DNS resolution
+  - toPorts:
+    - ports:
+      - port: "53"
+        protocol: ANY
+
+  # 3. CRITICAL: Allow MetalLB Memberlist (Speaker Gossip)  <-- ADD THIS
+  - toPorts:
+    - ports:
+      - port: "7946"
+        protocol: ANY
+
+  # 4. Allow "The World" EXCEPT the Admin Network
+  - toCIDRSet:
+    - cidr: "0.0.0.0/0"
+      except:
+      - "{{ networks.admin.prefix }}.0/{{ networks.admin.cidr }}"
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: allow-metallb-webhook
+spec:
+  description: "Allow K8s API Server to reach MetalLB Webhook for validation"
+  endpointSelector:
+    matchLabels:
+      app: metallb
+      component: controller
+  ingress:
+  - fromEntities:
+    - kube-apiserver
+    - host
+    - remote-node
+    toPorts:
+    - ports:
+      - port: "443"
+        protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: allow-metallb-gossip
+spec:
+  description: "Allow MetalLB Speakers to talk to each other (Memberlist)"
+  endpointSelector:
+    matchLabels:
+      app: metallb
+      component: speaker
+  ingress:
+  # Allow Gossip traffic from other nodes/pods
+  - fromEntities:
+    - cluster
+    - host
+    - remote-node
+    toPorts:
+    - ports:
+      - port: "7946"
+        protocol: ANY
+  # Allow Prometheus metrics (optional, but good practice)
+  - fromEntities:
+    - cluster
+    - host
+    - remote-node
+    toPorts:
+    - ports:
+      - port: "7472"
+        protocol: TCP

@@ -136,9 +136,10 @@
       IPv4AcceptLocal=yes
       ConfigureWithoutCarrier=yes
       [RoutingPolicyRule]
-      From={{ public_ip }}/32
+      From={{ public_ip }}/{{ public_cidr }}
       Table=200
       Priority=200
+
       [Route]
       Destination=0.0.0.0/0
       Gateway={{ gateway_public }}
