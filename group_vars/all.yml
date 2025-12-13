@@ -3,6 +3,7 @@ cluster_vip: "192.168.255.50"
 cluster_private_vip: "192.168.110.50"
 pod_network: "10.244.0.0/16"
 debian_release: "trixie"
+kernel_flavour: "xanmod"
 # --- NETWORK CONFIGURATION ---
 networks:
   # Standard /24 Network
@@ -65,6 +66,7 @@ grub_base_args:
   - "quiet"
   - "splash"
   - "xen_nopvspin=1"
+
 
 # Tuning parameters for Strix Halo / AI workloads
 ai_tuning_args:

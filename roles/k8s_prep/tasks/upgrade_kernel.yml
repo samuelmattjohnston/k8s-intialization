@@ -9,13 +9,14 @@
     update_cache: yes
 
 # -----------------------------------------------------------
-# 1. REPO SETUP
+# 1. REPO SETUP (ZABBLY)
 # -----------------------------------------------------------
 - name: "Kernel: Ensure Keyrings Directory"
   file:
     path: /etc/apt/keyrings
     state: directory
     mode: '0755'
+  when: kernel_flavour == 'zabbly'
 
 - name: "Kernel: Download and Verify Zabbly Key"
   block:
@@ -35,35 +36,74 @@
         dest: /etc/apt/keyrings/zabbly.asc
         mode: '0644'
         remote_src: yes
+  when: kernel_flavour == 'zabbly'
   rescue:
     - name: "Fail if Fingerprint Mismatch"
       fail:
         msg: "The Zabbly GPG Key fingerprint did not match the expected value. Aborting."
+      when: kernel_flavour == 'zabbly'
 
 - name: "Kernel: Add Zabbly Repository"
   apt_repository:
     repo: "deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/kernel/stable {{ debian_release }} main"
     filename: zabbly-kernel-stable
     state: present
-  register: repo_added
+  register: repo_added_zabbly
+  when: kernel_flavour == 'zabbly'
 
-- name: "Kernel: Update Apt Cache"
-  apt:
-    update_cache: yes
-  when: repo_added.changed
+# -----------------------------------------------------------
+# 1. REPO SETUP (XANMOD)
+# -----------------------------------------------------------
+- name: "Kernel: Install apt-transport-https for key registration"
+  ansible.builtin.apt:
+    name: apt-transport-https
+    state: present
+  when: kernel_flavour == 'xanmod'
+
+- name: "Kernel: Register XanMod PGP key and dearmor"
+  ansible.builtin.shell: |
+    wget -qO - https://dl.xanmod.org/archive.key | gpg --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg
+  args:
+    creates: /etc/apt/keyrings/xanmod-archive-keyring.gpg
+  changed_when: true # Always mark as changed if it creates the file
+  when: kernel_flavour == 'xanmod'
+
+- name: "Kernel: Add XanMod Repository"
+  ansible.builtin.apt_repository:
+    # Use the variable 'debian_release' (e.g., trixie)
+    repo: "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org {{ debian_release }} main"
+    filename: xanmod
+    state: present
+  register: repo_added_xanmod
+  when: kernel_flavour == 'xanmod'
 
 # -----------------------------------------------------------
 # 2. KERNEL INSTALLATION
 # -----------------------------------------------------------
+- name: "Kernel: Update Apt Cache"
+  apt:
+    update_cache: yes
+  when: repo_added_zabbly.changed or repo_added_xanmod.changed
+
 - name: "Kernel: Install Latest Zabbly Kernel"
   apt:
     name:
       - linux-zabbly
     state: latest
-  register: kernel_upgrade
+  register: kernel_upgrade_zabbly
+  when: kernel_flavour == 'zabbly'
+
+- name: "Kernel: Install Latest XanMod Kernel (x64v3 - High Performance)"
+  apt:
+    # Use a modern, high-performance variant
+    name:
+      - linux-xanmod-x64v3
+    state: latest
+  register: kernel_upgrade_xanmod
+  when: kernel_flavour == 'xanmod'
 
 # -----------------------------------------------------------
-# 3. GRUB TUNING
+# 3. GRUB TUNING (Identical for both kernels)
 # -----------------------------------------------------------
 - name: "Kernel: Set GRUB Timeout to 10s"
   lineinfile:
@@ -81,6 +121,7 @@
       GRUB_CMDLINE_LINUX_DEFAULT="{{ (grub_base_args + (ai_tuning_args if inventory_hostname in groups['ai_nodes'] else [])) | join(' ') }}"
   register: grub_config
   notify: Update bootloader
+
 # -----------------------------------------------------------
 # 4. REBOOT LOGIC
 # -----------------------------------------------------------
@@ -89,12 +130,17 @@
     path: /var/run/reboot-required
   register: reboot_required_file
 
+- name: Set reboot_required fact
+  set_fact:
+    kernel_changed_status: >
+      {{ kernel_upgrade_zabbly.changed | default(false) or kernel_upgrade_xanmod.changed | default(false) }}
+
 - name: "Reboot: Trigger Reboot"
   reboot:
     msg: "Rebooting node for Kernel/Config updates"
     reboot_timeout: 300
     post_reboot_delay: 30
   when: >
-    (kernel_upgrade.changed | default(false)) or
+    kernel_changed_status | bool or
     (grub_config.changed | default(false)) or
     reboot_required_file.stat.exists
