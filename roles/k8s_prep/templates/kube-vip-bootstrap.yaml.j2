@@ -34,7 +34,7 @@ spec:
     - name: vip_ddns
       value: "false"
     - name: address
-      value: "{{ cluster_private_vip }}"
+      value: "{{ networks.private.prefix }}.{{ cluster_private_vip }}"
     # FEATURES
     - name: cp_enable
       value: "true"

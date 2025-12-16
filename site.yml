@@ -52,8 +52,8 @@
         src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
         dest: "/etc/kubernetes/manifests/kube-vip-{{ item.name }}.yaml"
       loop:
-        - { name: "admin",    vip: "{{ cluster_vip }}",          interface: "{{ net_admin_dev }}",   metrics_port: "2112" }
-        - { name: "internal", vip: "{{ cluster_private_vip }}",  interface: "{{ net_private_dev }}", metrics_port: "2113" }
+        - { name: "admin",    vip: "{{ networks.admin.prefix }}.{{ cluster_vip }}",          interface: "{{ net_admin_dev }}",   metrics_port: "2112" }
+        - { name: "internal", vip: "{{ networks.private.prefix }}.{{ cluster_private_vip }}",  interface: "{{ net_private_dev }}", metrics_port: "2113" }
 
     # 4. CLEANUP: Remove the bootstrap pod
     - name: "HA: Remove Bootstrap Kube-VIP Manifest"
@@ -70,7 +70,7 @@
     # --- VERIFICATION ---
     - name: "Bootstrap: Verify Admin Access (Laptop -> Admin VIP)"
       wait_for:
-        host: "{{ cluster_vip }}"
+        host: "{{ networks.admin.prefix }}.{{ cluster_vip }}"
         port: 6443
         timeout: 180
         delay: 5
@@ -79,7 +79,7 @@
 
     - name: "Bootstrap: Verify Internal Access (Node -> Internal VIP)"
       wait_for:
-        host: "{{ cluster_private_vip }}"
+        host: "{{ networks.private.prefix }}.{{ cluster_private_vip }}"
         port: 6443
         timeout: 60
         delay: 2
@@ -144,8 +144,8 @@
         src: roles/k8s_prep/templates/kube-vip-ha.yaml.j2
         dest: "/etc/kubernetes/manifests/kube-vip-{{ item.name }}.yaml"
       loop:
-        - { name: "admin",    vip: "{{ cluster_vip }}",          interface: "{{ net_admin_dev }}",   metrics_port: "2112" }
-        - { name: "internal", vip: "{{ cluster_private_vip }}",  interface: "{{ net_private_dev }}", metrics_port: "2113" }
+        - { name: "admin",    vip: "{{ networks.admin.prefix }}.{{ cluster_vip }}",          interface: "{{ net_admin_dev }}",   metrics_port: "2112" }
+        - { name: "internal", vip: "{{ networks.private.prefix }}.{{ cluster_private_vip }}",  interface: "{{ net_private_dev }}", metrics_port: "2113" }
 
     # 4. CLEANUP
     - name: "HA: Remove Bootstrap Kube-VIP Manifest"

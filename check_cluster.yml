@@ -194,7 +194,7 @@
     # --- NEGATIVE TEST (Should Fail / Timeout) ---
     - name: "Security: Verify Admin Network Isolation (Pod -> Admin VIP)"
       command: >
-        kubectl exec -n {{ test_ns }} curl-client -- curl -m 3 -s -o /dev/null -w "%{http_code}" http://{{ admin_vip }}:6443
+        kubectl exec -n {{ test_ns }} curl-client -- curl -m 3 -s -o /dev/null -w "%{http_code}" http://{{ networks.admin.prefix }}.{{ admin_vip }}:6443
       register: security_test
       # We EXPECT this to fail (rc != 0) OR return 000 (timeout)
       failed_when: security_test.rc == 0 and security_test.stdout != "000"

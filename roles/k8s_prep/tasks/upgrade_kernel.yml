@@ -97,7 +97,7 @@
   apt:
     # Use a modern, high-performance variant
     name:
-      - linux-xanmod-x64v3
+      - linux-xanmod-{{ xanmod_version }}
     state: latest
   register: kernel_upgrade_xanmod
   when: kernel_flavour == 'xanmod'

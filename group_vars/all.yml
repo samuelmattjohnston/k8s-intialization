@@ -1,6 +1,6 @@
 # Cluster Settings
-cluster_vip: "192.168.255.50"
-cluster_private_vip: "192.168.110.50"
+cluster_vip: "250"
+cluster_private_vip: "250"
 pod_network: "10.244.0.0/16"
 debian_release: "trixie"
 kernel_flavour: "xanmod"
@@ -8,19 +8,19 @@ kernel_flavour: "xanmod"
 networks:
   # Standard /24 Network
   admin:
-    prefix: "192.168.255"
+    prefix: "192.168.86"
     cidr: "24"
-    gateway_octet: "254"
+    gateway_octet: "1"
   public:
-    prefix: "192.168.130"    # You still define the first 3 octets
-    cidr: "24"            # But the mask is now configurable
+    prefix: "250.13.255"    # You still define the first 3 octets
+    cidr: "16"            # But the mask is now configurable
     gateway_octet: "254"
   private:
-    prefix: "192.168.110"
-    cidr: "24"
+    prefix: "250.11.255"
+    cidr: "16"
   internal:
-    prefix: "192.168.100"
-    cidr: "24"          # Can be /24, /16, etc.
+    prefix: "250.10.255"
+    cidr: "16"          # Can be /24, /16, etc.
     mtu: "9000"         # OPTIONAL: Jumbo frames are great for storage networks
 # MetalLB LoadBalancer Range
 # This will simply append to the public.prefix
@@ -30,10 +30,14 @@ metallb:
 
 # Network IDs (Trunk Mode)
 vlan_ids:
-  public: 130
-  private: 110
-  internal: 100
-
+  public: 13
+  private: 11
+  internal: 10
+# VXLAN IDs (VXLAN Mode - VNI)
+vxlan_vnis:
+  public: 10130
+  private: 10110
+  internal: 10100
 # Addon Versions
 versions:
   kubernetes: "1.34"
@@ -74,3 +78,5 @@ ai_tuning_args:
   - "ttm.pages_limit=28835840"
   - "ttm.page_pool_size=28835840"
   - "amdgpu.gttsize=112640"
+
+xanmod_version: x64v3

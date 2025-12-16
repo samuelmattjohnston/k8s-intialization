@@ -12,13 +12,13 @@ nodeRegistration:
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 kubernetesVersion: "v{{ versions.kubernetes_full }}"
-controlPlaneEndpoint: "{{ cluster_private_vip }}:6443"
+controlPlaneEndpoint: "{{ networks.private.prefix }}.{{ cluster_private_vip }}:6443"
 networking:
   podSubnet: "{{ pod_network }}"
 apiServer:
   certSANs:
-  - "{{ cluster_vip }}"
-  - "{{ cluster_private_vip }}"
+  - "{{ networks.admin.prefix }}.{{ cluster_vip }}"
+  - "{{ networks.private.prefix }}.{{ cluster_private_vip }}"
   - "127.0.0.1"
   - "localhost"
   - "{{ admin_ip }}"
